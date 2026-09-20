@@ -1,8 +1,22 @@
 package com.n2bank.infrastructure.postgres;
 
 import com.n2bank.application.port.JournalEntryRepository;
+import com.n2bank.application.port.RepositoryException;
 import com.n2bank.domain.model.IdempotencyKey;
 import com.n2bank.domain.model.JournalEntry;
+import com.n2bank.domain.model.Posting;
+import com.n2bank.infrastructure.postgres.mapper.JournalEntryMapper;
+import com.n2bank.infrastructure.postgres.mapper.PostingRowMapper;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -10,7 +24,50 @@ import javax.sql.DataSource;
 
 /** PostgreSQL adapter for the append-only journal. */
 public final class PostgresJournalEntryRepository implements JournalEntryRepository {
+  private static final String INSERT_JOURNAL_ENTRY =
+      """
+      INSERT INTO journal_entries (
+          id,
+          effective_at,
+          description,
+          external_reference,
+          idempotency_key
+      )
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (idempotency_key) DO NOTHING
+      """;
+
+  private static final String INSERT_POSTING =
+      """
+      INSERT INTO postings (
+          journal_entry_id,
+          posting_index,
+          account_id,
+          amount,
+          direction,
+          currency
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+      """;
+
+  private static final String SELECT_ENTRY_BY_IDEMPOTENCY_KEY =
+      """
+      SELECT id, effective_at, description, external_reference
+      FROM journal_entries
+      WHERE idempotency_key = ?
+      """;
+
+  private static final String SELECT_POSTINGS_BY_ENTRY_ID =
+      """
+      SELECT account_id, amount, direction, currency
+      FROM postings
+      WHERE journal_entry_id = ?
+      ORDER BY posting_index
+      """;
+
   private final DataSource dataSource;
+  private final PostingRowMapper postingMapper = new PostingRowMapper();
+  private final JournalEntryMapper journalEntryMapper = new JournalEntryMapper();
 
   public PostgresJournalEntryRepository(DataSource dataSource) {
     this.dataSource = Objects.requireNonNull(dataSource, "Data source cannot be null");
@@ -32,9 +89,142 @@ public final class PostgresJournalEntryRepository implements JournalEntryReposit
   public JournalEntry append(JournalEntry journalEntry, IdempotencyKey idempotencyKey) {
     Objects.requireNonNull(journalEntry, "Journal entry cannot be null");
     Objects.requireNonNull(idempotencyKey, "Idempotency key cannot be null");
-    // Implementation point: use one connection and one transaction for account validation,
-    // idempotency, the journal entry, and every posting. See DATABASE_IMPLEMENTATION.md.
-    throw schemaNotImplemented();
+
+    try (Connection connection = dataSource.getConnection()) {
+      connection.setAutoCommit(false);
+
+      try {
+        boolean inserted = insertJournalEntry(connection, journalEntry, idempotencyKey);
+        if (!inserted) {
+          JournalEntry stored = loadByIdempotencyKey(connection, idempotencyKey);
+          requireSameRequest(stored, journalEntry, idempotencyKey);
+          connection.commit();
+          return stored;
+        }
+
+        insertPostings(connection, journalEntry);
+        connection.commit();
+        return journalEntry;
+      } catch (SQLException | RuntimeException exception) {
+        rollback(connection, exception);
+        throw exception;
+      }
+    } catch (RepositoryException exception) {
+      throw exception;
+    } catch (SQLException exception) {
+      throw new RepositoryException(
+          "Could not append journal entry " + journalEntry.id(), exception);
+    }
+  }
+
+  private boolean insertJournalEntry(
+      Connection connection, JournalEntry entry, IdempotencyKey idempotencyKey)
+      throws SQLException {
+    try (PreparedStatement statement = connection.prepareStatement(INSERT_JOURNAL_ENTRY)) {
+      statement.setObject(1, entry.id());
+      statement.setObject(
+          2, OffsetDateTime.ofInstant(entry.effectiveAt(), ZoneOffset.UTC));
+      statement.setString(3, entry.description());
+      statement.setString(4, entry.externalReference());
+      statement.setString(5, idempotencyKey.value());
+      return statement.executeUpdate() == 1;
+    }
+  }
+
+  private void insertPostings(Connection connection, JournalEntry entry) throws SQLException {
+    try (PreparedStatement statement = connection.prepareStatement(INSERT_POSTING)) {
+      for (int index = 0; index < entry.postings().size(); index++) {
+        Posting posting = entry.postings().get(index);
+        statement.setObject(1, entry.id());
+        statement.setInt(2, index);
+        statement.setObject(3, posting.accountId());
+        statement.setBigDecimal(4, posting.amount().amount());
+        statement.setString(5, posting.direction().name());
+        statement.setString(6, posting.amount().currency().getCurrencyCode());
+        statement.addBatch();
+      }
+
+      int[] results = statement.executeBatch();
+      if (results.length != entry.postings().size()) {
+        throw new SQLException("PostgreSQL did not report a result for every posting");
+      }
+      for (int result : results) {
+        if (result == Statement.EXECUTE_FAILED || result == 0) {
+          throw new SQLException("PostgreSQL failed to insert a posting");
+        }
+      }
+    }
+  }
+
+  private JournalEntry loadByIdempotencyKey(
+      Connection connection, IdempotencyKey idempotencyKey) throws SQLException {
+    try (PreparedStatement entryStatement =
+        connection.prepareStatement(SELECT_ENTRY_BY_IDEMPOTENCY_KEY)) {
+      entryStatement.setString(1, idempotencyKey.value());
+
+      try (ResultSet entryRow = entryStatement.executeQuery()) {
+        if (!entryRow.next()) {
+          throw new SQLException(
+              "Idempotency conflict occurred but the stored journal entry was not found");
+        }
+
+        UUID entryId = entryRow.getObject("id", UUID.class);
+        List<Posting> postings = loadPostings(connection, entryId);
+        return journalEntryMapper.map(entryRow, postings);
+      }
+    }
+  }
+
+  private List<Posting> loadPostings(Connection connection, UUID entryId) throws SQLException {
+    try (PreparedStatement statement = connection.prepareStatement(SELECT_POSTINGS_BY_ENTRY_ID)) {
+      statement.setObject(1, entryId);
+      try (ResultSet rows = statement.executeQuery()) {
+        List<Posting> postings = new ArrayList<>();
+        while (rows.next()) {
+          postings.add(postingMapper.map(rows));
+        }
+        return List.copyOf(postings);
+      }
+    }
+  }
+
+  private void requireSameRequest(
+      JournalEntry stored, JournalEntry requested, IdempotencyKey idempotencyKey) {
+    if (!sameEntry(stored, requested)) {
+      throw new RepositoryException(
+          "Idempotency key " + idempotencyKey.value() + " was already used for another entry");
+    }
+  }
+
+  private boolean sameEntry(JournalEntry first, JournalEntry second) {
+    if (!first.id().equals(second.id())
+        || !first.effectiveAt().truncatedTo(ChronoUnit.MICROS)
+            .equals(second.effectiveAt().truncatedTo(ChronoUnit.MICROS))
+        || !first.description().equals(second.description())
+        || !Objects.equals(first.externalReference(), second.externalReference())
+        || first.postings().size() != second.postings().size()) {
+      return false;
+    }
+
+    for (int index = 0; index < first.postings().size(); index++) {
+      Posting left = first.postings().get(index);
+      Posting right = second.postings().get(index);
+      if (!left.accountId().equals(right.accountId())
+          || left.direction() != right.direction()
+          || !left.amount().currency().equals(right.amount().currency())
+          || left.amount().amount().compareTo(right.amount().amount()) != 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private void rollback(Connection connection, Exception original) {
+    try {
+      connection.rollback();
+    } catch (SQLException rollbackFailure) {
+      original.addSuppressed(rollbackFailure);
+    }
   }
 
   private UnsupportedOperationException schemaNotImplemented() {

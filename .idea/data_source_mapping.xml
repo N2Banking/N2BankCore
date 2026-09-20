@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="DataSourcePerFileMappings">
+    <file url="file://$PROJECT_DIR$/src/com/n2bank/infrastructure/postgres/PostgresJournalEntryRepository.java" value="7fbcff43-3679-4c62-b531-6c74c7878d6d" />
+  </component>
+</project>
