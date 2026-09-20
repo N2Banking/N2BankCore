@@ -23,6 +23,7 @@ public final class PostgresAccountRepository implements AccountRepository {
 
   @Override
   public void create(Account account) {
+
     Objects.requireNonNull(account, "Account cannot be null");
     throw schemaNotImplemented();
   }
