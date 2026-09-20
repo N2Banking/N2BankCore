@@ -5,6 +5,9 @@ import com.n2bank.application.port.JournalEntryRepository;
 import com.n2bank.domain.model.IdempotencyKey;
 import com.n2bank.domain.model.JournalEntry;
 import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
 
 /** Coordinates posting journal entries to the bank's single logical ledger. */
 public final class PostingService {
@@ -26,6 +29,26 @@ public final class PostingService {
   public JournalEntry post(JournalEntry journalEntry, IdempotencyKey idempotencyKey) {
     Objects.requireNonNull(journalEntry, "Journal entry cannot be null");
     Objects.requireNonNull(idempotencyKey, "Idempotency key cannot be null");
-    throw new UnsupportedOperationException("Posting workflow is not implemented yet");
+    JournalEntry stored = journalEntries.append(journalEntry, idempotencyKey);
+    Set<UUID> affectedAccounts =
+        stored.postings().stream()
+            .map(posting -> posting.accountId())
+            .collect(Collectors.toSet());
+
+    for (UUID accountId : affectedAccounts) {
+      try {
+        balances.invalidate(accountId);
+      } catch (UnsupportedOperationException cacheNotImplemented) {
+        System.err.printf(
+            "Journal entry %s committed; balance cache invalidation is not implemented yet.%n",
+            stored.id());
+        break;
+      } catch (RuntimeException cacheFailure) {
+        System.err.printf(
+            "Journal entry %s committed, but cache invalidation failed for account %s: %s%n",
+            stored.id(), accountId, cacheFailure.getMessage());
+      }
+    }
+    return stored;
   }
 }

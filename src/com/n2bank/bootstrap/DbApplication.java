@@ -3,10 +3,13 @@ package com.n2bank.bootstrap;
 import com.n2bank.application.port.AccountRepository;
 import com.n2bank.application.port.BalanceCache;
 import com.n2bank.application.port.JournalEntryRepository;
+import com.n2bank.application.service.AccountService;
+import com.n2bank.application.service.CustomerService;
 import com.n2bank.application.service.PostingService;
 import com.n2bank.infrastructure.database.DBConfig;
 import com.n2bank.infrastructure.database.DBHandler;
 import com.n2bank.infrastructure.postgres.PostgresAccountRepository;
+import com.n2bank.infrastructure.postgres.PostgresCustomerRepository;
 import com.n2bank.infrastructure.postgres.PostgresJournalEntryRepository;
 import com.n2bank.infrastructure.redis.RedisBalanceCache;
 
@@ -18,8 +21,11 @@ public abstract class DbApplication implements Runnable {
       AccountRepository accounts = new PostgresAccountRepository(db.postgres());
       JournalEntryRepository journal = new PostgresJournalEntryRepository(db.postgres());
       BalanceCache cache = new RedisBalanceCache(db.redis());
+      AccountService accountService = new AccountService(accounts);
+      CustomerService customerService =
+          new CustomerService(new PostgresCustomerRepository(db.postgres()));
       PostingService postingService = new PostingService(journal, cache);
-      application(postingService, accounts);
+      application(postingService, accountService, customerService);
     }
   }
 
@@ -28,5 +34,7 @@ public abstract class DbApplication implements Runnable {
    * workers must wait for their shutdown before returning; returning closes the clients.
    */
   protected abstract void application(
-      PostingService postingService, AccountRepository accounts);
+      PostingService postingService,
+      AccountService accountService,
+      CustomerService customerService);
 }
