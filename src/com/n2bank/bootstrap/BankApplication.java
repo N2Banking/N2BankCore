@@ -1,6 +1,7 @@
 package com.n2bank.bootstrap;
 
 import com.n2bank.application.service.AccountService;
+import com.n2bank.application.service.BalanceService;
 import com.n2bank.application.service.CustomerService;
 import com.n2bank.application.service.PostingService;
 import com.n2bank.domain.model.Account;
@@ -40,7 +41,8 @@ public class BankApplication extends DbApplication {
   protected void application(
       PostingService postingService,
       AccountService accountService,
-      CustomerService customerService) {
+      CustomerService customerService,
+      BalanceService balanceService) {
     Currency euro = Currency.getInstance("EUR");
 
     Customer firstCustomer =
@@ -122,6 +124,12 @@ public class BankApplication extends DbApplication {
     System.out.printf(
         "Workflow completed: deposit=%s, transfer=%s, depositFee=%s, transferFee=%s%n",
         storedDeposit.id(), storedTransfer.id(), depositFee, transferFee);
+    System.out.printf(
+        "Balances: Alice=%s, Bob=%s, bankCash=%s, feeRevenue=%s%n",
+        balanceService.getBalance(firstDepositAccount.accountId()),
+        balanceService.getBalance(secondDepositAccount.accountId()),
+        balanceService.getBalance(cashAccount.accountId()),
+        balanceService.getBalance(feeRevenueAccount.accountId()));
   }
 
 }
