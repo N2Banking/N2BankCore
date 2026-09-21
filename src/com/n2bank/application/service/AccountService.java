@@ -3,6 +3,7 @@ package com.n2bank.application.service;
 import com.n2bank.application.port.AccountRepository;
 import com.n2bank.domain.model.Account;
 import java.util.Objects;
+import java.util.UUID;
 
 /** Coordinates account use cases. */
 public final class AccountService {
@@ -25,5 +26,12 @@ public final class AccountService {
           "Account " + account.accountId() + " already exists with different data");
     }
     return stored;
+  }
+
+  public Account getRequired(UUID accountId) {
+    Objects.requireNonNull(accountId, "Account ID cannot be null");
+    return accounts
+        .findById(accountId)
+        .orElseThrow(() -> new IllegalArgumentException("Account " + accountId + " does not exist"));
   }
 }

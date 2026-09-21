@@ -1,5 +1,7 @@
 package com.n2bank.bootstrap;
 
+import com.n2bank.application.fee.FeePolicy;
+import com.n2bank.application.fee.PercentageFeePolicy;
 import com.n2bank.application.service.AccountService;
 import com.n2bank.application.service.BalanceService;
 import com.n2bank.application.service.CustomerService;
@@ -8,12 +10,13 @@ import com.n2bank.domain.model.Account;
 import com.n2bank.domain.model.AccountType;
 import com.n2bank.domain.model.Customer;
 import com.n2bank.domain.model.CustomerType;
-import com.n2bank.domain.model.Direction;
+import com.n2bank.domain.model.FeeType;
 import com.n2bank.domain.model.IdempotencyKey;
 import com.n2bank.domain.model.JournalEntry;
 import com.n2bank.domain.model.Money;
-import com.n2bank.domain.model.Posting;
 import java.time.Instant;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.Currency;
 import java.util.List;
 import java.util.Optional;
@@ -34,13 +37,38 @@ public final class TestBankApplication extends BankApplication {
   private static final UUID SECOND_DEPOSIT_ACCOUNT_ID =
       UUID.fromString("60000000-0000-0000-0000-000000000202");
   private static final UUID DEPOSIT_ENTRY_ID =
-      UUID.fromString("60000000-0000-0000-0000-000000000301");
+      UUID.fromString("60000000-0000-0000-0000-000000000401");
   private static final UUID TRANSFER_ENTRY_ID =
-      UUID.fromString("60000000-0000-0000-0000-000000000302");
+      UUID.fromString("60000000-0000-0000-0000-000000000402");
 
   @Override
   protected boolean rollbackDatabaseChanges() {
     return true;
+  }
+
+  @Override
+  protected List<FeePolicy> feePolicies() {
+    return List.of(
+        new PercentageFeePolicy(
+            FeeType.CASH_DEPOSIT,
+            new BigDecimal("0.03"),
+            RoundingMode.HALF_EVEN,
+            "3 percent bank fee"),
+        new PercentageFeePolicy(
+            FeeType.TRANSFER,
+            new BigDecimal("0.01"),
+            RoundingMode.HALF_EVEN,
+            "1 percent bank fee"));
+  }
+
+  @Override
+  protected UUID bankCashAccountId(Currency currency) {
+    return CASH_ACCOUNT_ID;
+  }
+
+  @Override
+  protected UUID feeRevenueAccountId(Currency currency) {
+    return FEE_REVENUE_ACCOUNT_ID;
   }
 
   @Override
@@ -52,10 +80,10 @@ public final class TestBankApplication extends BankApplication {
     Currency euro = Currency.getInstance("EUR");
 
     Customer firstCustomer =
-        customerService.ensureExists(
+        createCustomer(
             new Customer(FIRST_CUSTOMER_ID, "Alice", CustomerType.PERSON));
     Customer secondCustomer =
-        customerService.ensureExists(
+        createCustomer(
             new Customer(SECOND_CUSTOMER_ID, "Bob", CustomerType.PERSON));
 
     Account cashAccount =
@@ -82,58 +110,48 @@ public final class TestBankApplication extends BankApplication {
             AccountType.LIABILITY,
             euro);
 
-    cashAccount = accountService.ensureExists(cashAccount);
-    feeRevenueAccount = accountService.ensureExists(feeRevenueAccount);
-    firstDepositAccount = accountService.ensureExists(firstDepositAccount);
-    secondDepositAccount = accountService.ensureExists(secondDepositAccount);
+    cashAccount = openAccount(cashAccount);
+    feeRevenueAccount = openAccount(feeRevenueAccount);
+    firstDepositAccount = openAccount(firstDepositAccount);
+    secondDepositAccount = openAccount(secondDepositAccount);
 
     Money depositedCash = new Money("100.00", euro);
-    Money depositFee = depositedCash.multiply("0.03");
-    Money creditedDeposit = depositedCash.subtract(depositFee);
-
-    JournalEntry deposit =
-        new JournalEntry(
-            DEPOSIT_ENTRY_ID,
-            Instant.parse("2026-09-21T13:00:00Z"),
-            "Alice deposits cash with a 3 percent bank fee",
-            "customer-workflow-deposit",
-            List.of(
-                new Posting(cashAccount.accountId(), depositedCash, Direction.DEBIT),
-                new Posting(firstDepositAccount.accountId(), creditedDeposit, Direction.CREDIT),
-                new Posting(feeRevenueAccount.accountId(), depositFee, Direction.CREDIT)));
-
     JournalEntry storedDeposit =
-        postingService.post(deposit, new IdempotencyKey("customer-workflow-deposit-v1"));
+        deposit(
+            firstDepositAccount.accountId(),
+            depositedCash,
+            new OperationMetadata(
+                DEPOSIT_ENTRY_ID,
+                Instant.parse("2026-09-21T13:00:00Z"),
+                "customer-workflow-deposit",
+                new IdempotencyKey("bank-facade-deposit-v1")));
 
     Money transferredAmount = new Money("50.00", euro);
-    Money transferFee = transferredAmount.multiply("0.01");
-    Money receivedAmount = transferredAmount.subtract(transferFee);
-
-    JournalEntry transfer =
-        new JournalEntry(
-            TRANSFER_ENTRY_ID,
-            Instant.parse("2026-09-21T13:01:00Z"),
-            "Alice sends money to Bob with a 1 percent bank fee",
-            "customer-workflow-transfer",
-            List.of(
-                new Posting(firstDepositAccount.accountId(), transferredAmount, Direction.DEBIT),
-                new Posting(secondDepositAccount.accountId(), receivedAmount, Direction.CREDIT),
-                new Posting(feeRevenueAccount.accountId(), transferFee, Direction.CREDIT)));
-
     JournalEntry storedTransfer =
-        postingService.post(transfer, new IdempotencyKey("customer-workflow-transfer-v1"));
+        transfer(
+            firstDepositAccount.accountId(),
+            secondDepositAccount.accountId(),
+            transferredAmount,
+            new OperationMetadata(
+                TRANSFER_ENTRY_ID,
+                Instant.parse("2026-09-21T13:01:00Z"),
+                "customer-workflow-transfer",
+                new IdempotencyKey("bank-facade-transfer-v1")));
+
+    Money depositFee = depositedCash.subtract(storedDeposit.postings().get(1).amount());
+    Money transferFee = storedTransfer.postings().get(2).amount();
 
     System.out.printf(
         "Workflow completed: deposit=%s, transfer=%s, depositFee=%s, transferFee=%s%n",
         storedDeposit.id(), storedTransfer.id(), depositFee, transferFee);
     System.out.printf(
         "Balances: Alice=%s, Bob=%s, bankCash=%s, feeRevenue=%s%n",
-        balanceService.getBalance(firstDepositAccount.accountId()),
-        balanceService.getBalance(secondDepositAccount.accountId()),
-        balanceService.getBalance(cashAccount.accountId()),
-        balanceService.getBalance(feeRevenueAccount.accountId()));
+        getBalance(firstDepositAccount.accountId()),
+        getBalance(secondDepositAccount.accountId()),
+        getBalance(cashAccount.accountId()),
+        getBalance(feeRevenueAccount.accountId()));
     System.out.printf(
         "Cached balance check: Alice=%s%n",
-        balanceService.getBalance(firstDepositAccount.accountId()));
+        getBalance(firstDepositAccount.accountId()));
   }
 }
