@@ -16,6 +16,12 @@ public interface JournalEntryRepository {
 
   Optional<JournalEntry> findByIdempotencyKey(IdempotencyKey idempotencyKey);
 
+  /** Ordered entries affecting the account within the time window (inclusive). Cache must be bypassed. */
+  default java.util.List<JournalEntry> findByAccount(
+      UUID accountId, java.time.Instant from, java.time.Instant to) {
+    throw new UnsupportedOperationException("findByAccount not implemented");
+  }
+
   /**
    * Atomically validates referenced accounts and persists the entry, all postings, and the
    * idempotency key. Each account must exist and its currency must match its posting's currency.

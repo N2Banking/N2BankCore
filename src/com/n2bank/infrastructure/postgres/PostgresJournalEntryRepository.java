@@ -65,6 +65,24 @@ public final class PostgresJournalEntryRepository implements JournalEntryReposit
       ORDER BY posting_index
       """;
 
+  private static final String SELECT_ENTRY_BY_ID =
+      """
+      SELECT id, effective_at, description, external_reference
+      FROM journal_entries
+      WHERE id = ?
+      """;
+
+  private static final String SELECT_ENTRIES_BY_ACCOUNT =
+      """
+      SELECT DISTINCT je.id, je.effective_at, je.description, je.external_reference
+      FROM journal_entries je
+      JOIN postings p ON p.journal_entry_id = je.id
+      WHERE p.account_id = ?
+        AND je.effective_at >= ?
+        AND je.effective_at <= ?
+      ORDER BY je.effective_at, je.id
+      """;
+
   private final DataSource dataSource;
   private final PostingRowMapper postingMapper = new PostingRowMapper();
   private final JournalEntryMapper journalEntryMapper = new JournalEntryMapper();
@@ -76,13 +94,59 @@ public final class PostgresJournalEntryRepository implements JournalEntryReposit
   @Override
   public Optional<JournalEntry> findById(UUID journalEntryId) {
     Objects.requireNonNull(journalEntryId, "Journal entry ID cannot be null");
-    throw schemaNotImplemented();
+    try (Connection connection = dataSource.getConnection();
+        PreparedStatement entryStatement = connection.prepareStatement(SELECT_ENTRY_BY_ID)) {
+      entryStatement.setObject(1, journalEntryId);
+      try (ResultSet entryRow = entryStatement.executeQuery()) {
+        if (!entryRow.next()) return Optional.empty();
+        UUID entryId = entryRow.getObject("id", UUID.class);
+        List<Posting> postings = loadPostings(connection, entryId);
+        return Optional.of(journalEntryMapper.map(entryRow, postings));
+      }
+    } catch (SQLException exception) {
+      throw new RepositoryException("Could not find journal entry " + journalEntryId, exception);
+    }
   }
 
   @Override
   public Optional<JournalEntry> findByIdempotencyKey(IdempotencyKey idempotencyKey) {
     Objects.requireNonNull(idempotencyKey, "Idempotency key cannot be null");
-    throw schemaNotImplemented();
+    try (Connection connection = dataSource.getConnection();
+        PreparedStatement statement = connection.prepareStatement(SELECT_ENTRY_BY_IDEMPOTENCY_KEY)) {
+      statement.setString(1, idempotencyKey.value());
+      try (ResultSet entryRow = statement.executeQuery()) {
+        if (!entryRow.next()) return Optional.empty();
+        UUID entryId = entryRow.getObject("id", UUID.class);
+        List<Posting> postings = loadPostings(connection, entryId);
+        return Optional.of(journalEntryMapper.map(entryRow, postings));
+      }
+    } catch (SQLException exception) {
+      throw new RepositoryException("Could not find journal entry by idempotency key " + idempotencyKey.value(), exception);
+    }
+  }
+
+  @Override
+  public List<JournalEntry> findByAccount(UUID accountId, java.time.Instant from, java.time.Instant to) {
+    Objects.requireNonNull(accountId, "Account ID cannot be null");
+    Objects.requireNonNull(from, "From cannot be null");
+    Objects.requireNonNull(to, "To cannot be null");
+    try (Connection connection = dataSource.getConnection();
+        PreparedStatement statement = connection.prepareStatement(SELECT_ENTRIES_BY_ACCOUNT)) {
+      statement.setObject(1, accountId);
+      statement.setObject(2, OffsetDateTime.ofInstant(from, ZoneOffset.UTC));
+      statement.setObject(3, OffsetDateTime.ofInstant(to, ZoneOffset.UTC));
+      List<JournalEntry> entries = new ArrayList<>();
+      try (ResultSet rows = statement.executeQuery()) {
+        while (rows.next()) {
+          UUID entryId = rows.getObject("id", UUID.class);
+          List<Posting> postings = loadPostings(connection, entryId);
+          entries.add(journalEntryMapper.map(rows, postings));
+        }
+      }
+      return List.copyOf(entries);
+    } catch (SQLException exception) {
+      throw new RepositoryException("Could not load statement for account " + accountId, exception);
+    }
   }
 
   @Override

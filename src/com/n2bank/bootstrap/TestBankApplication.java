@@ -6,17 +6,10 @@ import com.n2bank.application.service.AccountService;
 import com.n2bank.application.service.BalanceService;
 import com.n2bank.application.service.CustomerService;
 import com.n2bank.application.service.PostingService;
-import com.n2bank.domain.model.Account;
-import com.n2bank.domain.model.AccountType;
-import com.n2bank.domain.model.Customer;
-import com.n2bank.domain.model.CustomerType;
-import com.n2bank.domain.model.FeeType;
-import com.n2bank.domain.model.IdempotencyKey;
-import com.n2bank.domain.model.JournalEntry;
-import com.n2bank.domain.model.Money;
-import java.time.Instant;
+import com.n2bank.domain.model.*;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
 import java.util.Currency;
 import java.util.List;
 import java.util.Optional;
@@ -80,11 +73,9 @@ public final class TestBankApplication extends BankApplication {
     Currency euro = Currency.getInstance("EUR");
 
     Customer firstCustomer =
-        createCustomer(
-            new Customer(FIRST_CUSTOMER_ID, "Alice", CustomerType.PERSON));
+        createCustomer(new Customer(FIRST_CUSTOMER_ID, "Alice", CustomerType.PERSON));
     Customer secondCustomer =
-        createCustomer(
-            new Customer(SECOND_CUSTOMER_ID, "Bob", CustomerType.PERSON));
+        createCustomer(new Customer(SECOND_CUSTOMER_ID, "Bob", CustomerType.PERSON));
 
     Account cashAccount =
         new Account(CASH_ACCOUNT_ID, "Bank cash", Optional.empty(), AccountType.ASSET, euro);
@@ -151,7 +142,6 @@ public final class TestBankApplication extends BankApplication {
         getBalance(cashAccount.accountId()),
         getBalance(feeRevenueAccount.accountId()));
     System.out.printf(
-        "Cached balance check: Alice=%s%n",
-        getBalance(firstDepositAccount.accountId()));
+        "Cached balance check: Alice=%s%n", getBalance(firstDepositAccount.accountId()));
   }
 }

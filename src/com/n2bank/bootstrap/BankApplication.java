@@ -13,6 +13,8 @@ public class BankApplication extends DbApplication {
   private CustomerService customers;
   private BalanceService balances;
   private FeeService fees;
+  private final Map<Currency, UUID> cashAccounts = new HashMap<>();
+  private final Map<Currency, UUID> revenueAccounts = new HashMap<>();
 
   @Override
   protected final void servicesReady(
@@ -46,6 +48,18 @@ public class BankApplication extends DbApplication {
 
   public Money getBalance(UUID accountId) {
     return balanceService().getBalance(accountId);
+  }
+
+  public java.util.Map<String, Money> trialBalance() {
+    return balanceService().trialBalance();
+  }
+
+  public java.util.List<JournalEntry> statement(UUID accountId, java.time.Instant from, java.time.Instant to) {
+    return balanceService().statement(accountId, from, to);
+  }
+
+  public java.util.List<JournalEntry> statement(UUID accountId, java.time.Instant from, java.time.Instant to, JournalEntryRepository journal) {
+    return journal.findByAccount(accountId, from, to);
   }
 
   public JournalEntry deposit(UUID accountId, Money amount, OperationMetadata metadata) {
@@ -124,14 +138,55 @@ public class BankApplication extends DbApplication {
         new Posting(revenue.accountId(), fee, Direction.CREDIT)));
   }
 
+  /**
+   * Register the bank-owned accounts for a currency. Call from {@link #servicesReady} or subclass
+   * constructor before any posting. Overrides must still call this map first.
+   */
+  protected final void registerSystemAccounts(Currency currency, UUID cashAccountId, UUID revenueAccountId) {
+    Objects.requireNonNull(currency, "Currency cannot be null");
+    Objects.requireNonNull(cashAccountId, "Cash account ID cannot be null");
+    Objects.requireNonNull(revenueAccountId, "Revenue account ID cannot be null");
+    cashAccounts.put(currency, cashAccountId);
+    revenueAccounts.put(currency, revenueAccountId);
+  }
+
+  /**
+   * Ensures the bank-owned cash/revenue accounts exist for the currency. Idempotent via
+   * {@link AccountService#ensureExists}.
+   */
+  protected final void ensureSystemAccounts(Currency currency, String cashName, String revenueName) {
+    Objects.requireNonNull(currency, "Currency cannot be null");
+    UUID cashId = bankCashAccountId(currency);
+    UUID revenueId = feeRevenueAccountId(currency);
+    openAccount(new Account(cashId, cashName, Optional.empty(), AccountType.ASSET, currency));
+    openAccount(new Account(revenueId, revenueName, Optional.empty(), AccountType.REVENUE, currency));
+  }
+
   /** Maps a currency to the bank-owned cash asset account. */
   protected UUID bankCashAccountId(Currency currency) {
-    throw new IllegalStateException("No bank cash account configured for " + currency);
+    UUID configured = cashAccounts.get(currency);
+    if (configured != null) return configured;
+    throw new IllegalStateException("No bank cash account configured for " + currency + ". Call registerSystemAccounts() in servicesReady().");
   }
 
   /** Maps a currency to the bank-owned fee revenue account. */
   protected UUID feeRevenueAccountId(Currency currency) {
-    throw new IllegalStateException("No fee revenue account configured for " + currency);
+    UUID configured = revenueAccounts.get(currency);
+    if (configured != null) return configured;
+    throw new IllegalStateException("No bank fee revenue account configured for " + currency + ". Call registerSystemAccounts() in servicesReady().");
+  }
+
+  /**
+   * Append-only reversal: new entry with flipped directions. Keeps original immutable per
+   * DATABASE_IMPLEMENTATION.md:41 - corrections use new reversal entries.
+   */
+  public JournalEntry reverse(JournalEntry original, OperationMetadata metadata) {
+    Objects.requireNonNull(original, "Original entry cannot be null");
+    List<Posting> reversed = original.postings().stream()
+        .map(p -> new Posting(p.accountId(), p.amount(),
+            p.direction() == Direction.DEBIT ? Direction.CREDIT : Direction.DEBIT))
+        .toList();
+    return post(metadata, "Reversal of " + original.id() + " - " + original.description(), reversed);
   }
 
   protected final PostingService postingService() {

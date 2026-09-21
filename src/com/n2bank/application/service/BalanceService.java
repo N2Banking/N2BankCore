@@ -37,6 +37,20 @@ public final class BalanceService {
     return balance;
   }
 
+  /** Trial balance is always authoritative from PostgreSQL - never cached. */
+  public java.util.Map<String, Money> trialBalance() {
+    return balances.trialBalance();
+  }
+
+  /** Statement bypasses cache to avoid stale reads; see RedisBalanceCache TTL. */
+  public java.util.List<com.n2bank.domain.model.JournalEntry> statement(
+      UUID accountId, java.time.Instant from, java.time.Instant to) {
+    Objects.requireNonNull(accountId, "Account ID cannot be null");
+    Objects.requireNonNull(from, "From cannot be null");
+    Objects.requireNonNull(to, "To cannot be null");
+    return balances.statement(accountId, from, to);
+  }
+
   private Optional<Money> findCached(UUID accountId) {
     try {
       return cache.find(accountId);
