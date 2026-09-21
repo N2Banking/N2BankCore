@@ -7,6 +7,7 @@ import com.n2bank.domain.model.JournalEntry;
 import com.n2bank.domain.model.Posting;
 import com.n2bank.infrastructure.postgres.mapper.JournalEntryMapper;
 import com.n2bank.infrastructure.postgres.mapper.PostingRowMapper;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -16,10 +17,16 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Currency;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import javax.sql.DataSource;
 
 /** PostgreSQL adapter for the append-only journal. */
@@ -81,6 +88,30 @@ public final class PostgresJournalEntryRepository implements JournalEntryReposit
         AND je.effective_at >= ?
         AND je.effective_at <= ?
       ORDER BY je.effective_at, je.id
+      """;
+
+  private static final String SELECT_ACCOUNT_FOR_UPDATE =
+      """
+      SELECT id, account_type, currency
+      FROM accounts
+      WHERE id = ?
+      FOR UPDATE
+      """;
+
+  private static final String SELECT_BALANCE =
+      """
+      SELECT a.currency,
+             a.account_type,
+             CASE
+               WHEN a.account_type IN ('ASSET', 'EXPENSE') THEN
+                 COALESCE(SUM(CASE WHEN p.direction = 'DEBIT' THEN p.amount ELSE -p.amount END), 0)
+               ELSE
+                 COALESCE(SUM(CASE WHEN p.direction = 'CREDIT' THEN p.amount ELSE -p.amount END), 0)
+             END AS balance
+        FROM accounts a
+        LEFT JOIN postings p ON p.account_id = a.id
+       WHERE a.id = ?
+       GROUP BY a.id, a.currency, a.account_type
       """;
 
   private final DataSource dataSource;
@@ -166,10 +197,23 @@ public final class PostgresJournalEntryRepository implements JournalEntryReposit
           return stored;
         }
 
+        enforceSufficientFunds(connection, journalEntry);
+
         insertPostings(connection, journalEntry);
         connection.commit();
         return journalEntry;
-      } catch (SQLException | RuntimeException exception) {
+      } catch (SQLException exception) {
+        if (isDuplicateIdViolation(exception)) {
+          rollback(connection, exception);
+          throw new RepositoryException(
+              "Journal entry id " + journalEntry.id() + " already exists with a different idempotency key", exception);
+        }
+        rollback(connection, exception);
+        throw exception;
+      } catch (RepositoryException exception) {
+        rollback(connection, exception);
+        throw exception;
+      } catch (RuntimeException exception) {
         rollback(connection, exception);
         throw exception;
       }
@@ -181,13 +225,76 @@ public final class PostgresJournalEntryRepository implements JournalEntryReposit
     }
   }
 
+  private boolean isDuplicateIdViolation(SQLException exception) {
+    if (!"23505".equals(exception.getSQLState())) return false;
+    String msg = exception.getMessage();
+    return msg != null && (msg.contains("journal_entries_pkey") || msg.contains("journal_entries_id") || msg.contains("journal_entries") && msg.contains("id"));
+  }
+
+  private void enforceSufficientFunds(Connection connection, JournalEntry entry) throws SQLException {
+    Set<UUID> affectedAccounts =
+        entry.postings().stream().map(Posting::accountId).collect(Collectors.toSet());
+
+    Map<UUID, List<Posting>> postingsByAccount =
+        entry.postings().stream().collect(Collectors.groupingBy(Posting::accountId));
+
+    Map<UUID, String> accountTypes = new HashMap<>();
+    Map<UUID, Currency> accountCurrencies = new HashMap<>();
+
+    for (UUID accountId : affectedAccounts) {
+      try (PreparedStatement lock = connection.prepareStatement(SELECT_ACCOUNT_FOR_UPDATE)) {
+        lock.setObject(1, accountId);
+        try (ResultSet rs = lock.executeQuery()) {
+          if (!rs.next()) {
+            throw new RepositoryException("Account does not exist: " + accountId);
+          }
+          accountTypes.put(accountId, rs.getString("account_type"));
+          accountCurrencies.put(accountId, Currency.getInstance(rs.getString("currency")));
+        }
+      }
+    }
+
+    for (UUID accountId : affectedAccounts) {
+      String accountType = accountTypes.get(accountId);
+      BigDecimal oldBalance = readBalance(connection, accountId);
+      List<Posting> postings = postingsByAccount.get(accountId);
+
+      BigDecimal netChange = BigDecimal.ZERO;
+      for (Posting p : postings) {
+        BigDecimal amt = p.amount().amount();
+        if ("ASSET".equals(accountType) || "EXPENSE".equals(accountType)) {
+          netChange = p.direction().name().equals("DEBIT") ? netChange.add(amt) : netChange.subtract(amt);
+        } else {
+          netChange = p.direction().name().equals("CREDIT") ? netChange.add(amt) : netChange.subtract(amt);
+        }
+      }
+      BigDecimal newBalance = oldBalance.add(netChange);
+      if (newBalance.compareTo(BigDecimal.ZERO) < 0) {
+        throw new RepositoryException(
+            "Insufficient funds in account " + accountId + ": balance " + oldBalance + " would become " + newBalance);
+      }
+    }
+  }
+
+  private BigDecimal readBalance(Connection connection, UUID accountId) throws SQLException {
+    try (PreparedStatement st = connection.prepareStatement(SELECT_BALANCE)) {
+      st.setObject(1, accountId);
+      try (ResultSet rs = st.executeQuery()) {
+        if (!rs.next()) {
+          throw new RepositoryException("Account does not exist: " + accountId);
+        }
+        return rs.getBigDecimal("balance");
+      }
+    }
+  }
+
   private boolean insertJournalEntry(
       Connection connection, JournalEntry entry, IdempotencyKey idempotencyKey)
       throws SQLException {
     try (PreparedStatement statement = connection.prepareStatement(INSERT_JOURNAL_ENTRY)) {
       statement.setObject(1, entry.id());
       statement.setObject(
-          2, OffsetDateTime.ofInstant(entry.effectiveAt(), ZoneOffset.UTC));
+          2, OffsetDateTime.ofInstant(entry.effectiveAt().truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC));
       statement.setString(3, entry.description());
       statement.setString(4, entry.externalReference());
       statement.setString(5, idempotencyKey.value());
@@ -202,7 +309,7 @@ public final class PostgresJournalEntryRepository implements JournalEntryReposit
         statement.setObject(1, entry.id());
         statement.setInt(2, index);
         statement.setObject(3, posting.accountId());
-        statement.setBigDecimal(4, posting.amount().amount());
+        statement.setBigDecimal(4, posting.amount().amount().stripTrailingZeros());
         statement.setString(5, posting.direction().name());
         statement.setString(6, posting.amount().currency().getCurrencyCode());
         statement.addBatch();

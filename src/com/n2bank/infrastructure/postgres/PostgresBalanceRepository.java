@@ -2,13 +2,23 @@ package com.n2bank.infrastructure.postgres;
 
 import com.n2bank.application.port.BalanceRepository;
 import com.n2bank.application.port.RepositoryException;
+import com.n2bank.domain.model.JournalEntry;
 import com.n2bank.domain.model.Money;
+import com.n2bank.domain.model.Posting;
+import com.n2bank.infrastructure.postgres.mapper.JournalEntryMapper;
+import com.n2bank.infrastructure.postgres.mapper.PostingRowMapper;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Currency;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import javax.sql.DataSource;
@@ -46,16 +56,20 @@ public final class PostgresBalanceRepository implements BalanceRepository {
        ORDER BY a.account_type, a.currency
       """;
 
-  private static final String SELECT_STATEMENT =
+  // Single-query statement: fetch all postings for entries affecting the account, no N+1.
+  private static final String SELECT_STATEMENT_FULL =
       """
-      SELECT je.id, je.effective_at, je.description, je.external_reference
+      SELECT je.id, je.effective_at, je.description, je.external_reference,
+             p.account_id, p.amount, p.direction, p.currency, p.posting_index
         FROM journal_entries je
         JOIN postings p ON p.journal_entry_id = je.id
-       WHERE p.account_id = ?
+       WHERE EXISTS (
+         SELECT 1 FROM postings p2
+          WHERE p2.journal_entry_id = je.id AND p2.account_id = ?
+       )
          AND je.effective_at >= ?
          AND je.effective_at <= ?
-       GROUP BY je.id, je.effective_at
-       ORDER BY je.effective_at, je.id
+       ORDER BY je.effective_at, je.id, p.posting_index
       """;
 
   private final DataSource dataSource;
@@ -105,38 +119,59 @@ public final class PostgresBalanceRepository implements BalanceRepository {
   }
 
   @Override
-  public java.util.List<com.n2bank.domain.model.JournalEntry> statement(
+  public List<JournalEntry> statement(
       UUID accountId, java.time.Instant from, java.time.Instant to) {
     Objects.requireNonNull(accountId, "Account ID cannot be null");
     Objects.requireNonNull(from, "From cannot be null");
     Objects.requireNonNull(to, "To cannot be null");
     try (Connection connection = dataSource.getConnection();
-        PreparedStatement statement = connection.prepareStatement(SELECT_STATEMENT)) {
+        PreparedStatement statement = connection.prepareStatement(SELECT_STATEMENT_FULL)) {
       statement.setObject(1, accountId);
-      statement.setObject(2, java.time.OffsetDateTime.ofInstant(from, java.time.ZoneOffset.UTC));
-      statement.setObject(3, java.time.OffsetDateTime.ofInstant(to, java.time.ZoneOffset.UTC));
-      java.util.List<com.n2bank.domain.model.JournalEntry> entries = new java.util.ArrayList<>();
-      com.n2bank.infrastructure.postgres.mapper.JournalEntryMapper jeMapper =
-          new com.n2bank.infrastructure.postgres.mapper.JournalEntryMapper();
-      com.n2bank.infrastructure.postgres.mapper.PostingRowMapper postingMapper =
-          new com.n2bank.infrastructure.postgres.mapper.PostingRowMapper();
+      statement.setObject(2, OffsetDateTime.ofInstant(from, ZoneOffset.UTC));
+      statement.setObject(3, OffsetDateTime.ofInstant(to, ZoneOffset.UTC));
+
+      JournalEntryMapper jeMapper = new JournalEntryMapper();
+      PostingRowMapper postingMapper = new PostingRowMapper();
+
+      // Group rows by journal entry in memory - single round-trip, no N+1.
+      Map<UUID, List<Posting>> postingsByEntry = new LinkedHashMap<>();
+      Map<UUID, ResultSet> entryMeta = new LinkedHashMap<>();
+      // We need to capture entry fields per id without holding ResultSet; store DTO.
+      Map<UUID, EntryHeader> headers = new LinkedHashMap<>();
+
       try (ResultSet rows = statement.executeQuery()) {
         while (rows.next()) {
           UUID entryId = rows.getObject("id", UUID.class);
-          java.util.List<com.n2bank.domain.model.Posting> postings = new java.util.ArrayList<>();
-          try (PreparedStatement ps = connection.prepareStatement(
-              "SELECT account_id, amount, direction, currency FROM postings WHERE journal_entry_id=? ORDER BY posting_index")) {
-            ps.setObject(1, entryId);
-            try (ResultSet pr = ps.executeQuery()) {
-              while (pr.next()) postings.add(postingMapper.map(pr));
-            }
-          }
-          entries.add(jeMapper.map(rows, java.util.List.copyOf(postings)));
+          OffsetDateTime effectiveAt = rows.getObject("effective_at", OffsetDateTime.class);
+          String description = rows.getString("description");
+          String externalRef = rows.getString("external_reference");
+
+          headers.computeIfAbsent(entryId, k -> new EntryHeader(entryId, effectiveAt, description, externalRef));
+
+          Posting posting = postingMapper.map(rows);
+          postingsByEntry.computeIfAbsent(entryId, k -> new ArrayList<>()).add(posting);
         }
       }
-      return java.util.List.copyOf(entries);
+
+      List<JournalEntry> entries = new ArrayList<>();
+      for (Map.Entry<UUID, EntryHeader> e : headers.entrySet()) {
+        UUID id = e.getKey();
+        EntryHeader h = e.getValue();
+        List<Posting> postings = List.copyOf(postingsByEntry.getOrDefault(id, List.of()));
+        // Reconstruct a synthetic ResultSet row via mapper that expects entry columns; use header directly.
+        JournalEntry entry = new JournalEntry(
+            h.id(),
+            h.effectiveAt().toInstant(),
+            h.description(),
+            h.externalReference(),
+            postings);
+        entries.add(entry);
+      }
+      return List.copyOf(entries);
     } catch (SQLException exception) {
       throw new RepositoryException("Could not read statement for account " + accountId, exception);
     }
   }
+
+  private record EntryHeader(UUID id, OffsetDateTime effectiveAt, String description, String externalReference) {}
 }
