@@ -10,20 +10,46 @@ import com.n2bank.application.service.CustomerService;
 import com.n2bank.application.service.PostingService;
 import com.n2bank.infrastructure.database.DBConfig;
 import com.n2bank.infrastructure.database.DBHandler;
+import com.n2bank.infrastructure.database.RollbackOnlyDataSource;
 import com.n2bank.infrastructure.postgres.PostgresAccountRepository;
 import com.n2bank.infrastructure.postgres.PostgresBalanceRepository;
 import com.n2bank.infrastructure.postgres.PostgresCustomerRepository;
 import com.n2bank.infrastructure.postgres.PostgresJournalEntryRepository;
 import com.n2bank.infrastructure.redis.RedisBalanceCache;
+import java.sql.Connection;
+import java.sql.SQLException;
+import javax.sql.DataSource;
 
 public abstract class DbApplication implements Runnable {
 
   @Override
   public final void run() {
     try (DBHandler db = new DBHandler(DBConfig.fromEnvironment())) {
-      AccountRepository accounts = new PostgresAccountRepository(db.postgres());
-      JournalEntryRepository journal = new PostgresJournalEntryRepository(db.postgres());
-      BalanceRepository balances = new PostgresBalanceRepository(db.postgres());
+      if (rollbackDatabaseChanges()) {
+        runRollbackOnly(db);
+      } else {
+        runApplication(db.postgres(), db);
+      }
+    }
+  }
+
+  private void runRollbackOnly(DBHandler db) {
+    try (Connection connection = db.postgresConnection()) {
+      RollbackOnlyDataSource testDataSource = new RollbackOnlyDataSource(connection);
+      try {
+        runApplication(testDataSource, db);
+      } finally {
+        testDataSource.rollback();
+      }
+    } catch (SQLException exception) {
+      throw new IllegalStateException("Could not run the rollback-only database workflow", exception);
+    }
+  }
+
+  private void runApplication(DataSource postgres, DBHandler db) {
+      AccountRepository accounts = new PostgresAccountRepository(postgres);
+      JournalEntryRepository journal = new PostgresJournalEntryRepository(postgres);
+      BalanceRepository balances = new PostgresBalanceRepository(postgres);
       BalanceCache cache = new RedisBalanceCache(db.redis());
       AccountService accountService = new AccountService(accounts);
       BalanceService balanceService = new BalanceService(balances, cache);
@@ -31,7 +57,11 @@ public abstract class DbApplication implements Runnable {
           new CustomerService(new PostgresCustomerRepository(db.postgres()));
       PostingService postingService = new PostingService(journal, cache);
       application(postingService, accountService, customerService, balanceService);
-    }
+  }
+
+  /** Override for executable database tests whose changes must be rolled back after the run. */
+  protected boolean rollbackDatabaseChanges() {
+    return false;
   }
 
   /**

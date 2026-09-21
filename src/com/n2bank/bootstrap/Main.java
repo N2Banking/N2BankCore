@@ -4,7 +4,7 @@ public final class Main {
   private Main() {}
 
   public static void main(String[] args) {
-    BankApplication app = new BankApplication();
+    BankApplication app = new TestBankApplication();
     app.run();
   }
 }
