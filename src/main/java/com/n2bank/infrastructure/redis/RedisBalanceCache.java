@@ -8,6 +8,7 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import redis.clients.jedis.RedisClient;
+import redis.clients.jedis.params.SetParams;
 
 /** Redis adapter for {@link BalanceCache}. */
 public final class RedisBalanceCache implements BalanceCache {
@@ -51,7 +52,7 @@ public final class RedisBalanceCache implements BalanceCache {
     Objects.requireNonNull(accountId, "Account ID cannot be null");
     Objects.requireNonNull(balance, "Balance cannot be null");
 
-    redisClient.setex(key(accountId), ttlSeconds, moneyCodec.encode(balance));
+    redisClient.set(key(accountId), moneyCodec.encode(balance), SetParams.setParams().ex(ttlSeconds));
     LOGGER.info("Balance cached for account {} with TTL {}s", accountId, ttlSeconds);
   }
 
