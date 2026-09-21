@@ -44,26 +44,29 @@ public final class RollbackOnlyDataSource implements DataSource {
         Proxy.newProxyInstance(
             Connection.class.getClassLoader(),
             new Class<?>[] {Connection.class},
-            (proxy, method, arguments) -> {
+            (_, method, arguments) -> {
               String methodName = method.getName();
-              if (methodName.equals("close") || methodName.equals("rollback")) {
-                return null;
-              }
-              if (methodName.equals("commit")) {
-                validateDeferredConstraints(delegate);
-                return null;
-              }
-              if (methodName.equals("setAutoCommit")) {
-                if (Boolean.TRUE.equals(arguments[0])) {
-                  throw new SQLException("The test transaction cannot enable auto-commit");
+              switch (methodName) {
+                case "close", "rollback" -> {
+                  return null;
                 }
-                return null;
-              }
-              if (methodName.equals("getAutoCommit")) {
-                return false;
-              }
-              if (methodName.equals("isClosed")) {
-                return delegate.isClosed();
+                case "commit" -> {
+                  validateDeferredConstraints(delegate);
+                  return null;
+                }
+                case "setAutoCommit" -> {
+                  if (Boolean.TRUE.equals(arguments[0])) {
+                    throw new SQLException("The test transaction cannot enable auto-commit");
+                  }
+                  return null;
+                }
+                case "getAutoCommit" -> {
+                  return false;
+                }
+                case "isClosed" -> {
+                  return delegate.isClosed();
+                }
+                default -> {}
               }
 
               try {
