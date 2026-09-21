@@ -1,42 +1,101 @@
 package com.n2bank.bootstrap;
 
 import com.n2bank.application.fee.FeeContext;
+import com.n2bank.application.fee.FeePolicy;
+import com.n2bank.application.fee.NoFeePolicy;
+import com.n2bank.application.port.AccountRepository;
+import com.n2bank.application.port.BalanceCache;
+import com.n2bank.application.port.BalanceRepository;
+import com.n2bank.application.port.JournalEntryRepository;
 import com.n2bank.application.service.*;
 import com.n2bank.domain.model.*;
+import com.n2bank.infrastructure.database.DBConfig;
+import com.n2bank.infrastructure.database.DBHandler;
+import com.n2bank.infrastructure.postgres.PostgresAccountRepository;
+import com.n2bank.infrastructure.postgres.PostgresBalanceRepository;
+import com.n2bank.infrastructure.postgres.PostgresCustomerRepository;
+import com.n2bank.infrastructure.postgres.PostgresJournalEntryRepository;
+import com.n2bank.infrastructure.redis.RedisBalanceCache;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
-/** Public facade for the bank engine. */
-public class BankApplication extends DbApplication {
-  private final Map<Currency, UUID> cashAccounts = new HashMap<>();
-  private final Map<Currency, UUID> revenueAccounts = new HashMap<>();
-  private PostingService postings;
-  private AccountService accounts;
-  private CustomerService customers;
-  private BalanceService balances;
-  private FeeService fees;
+/**
+ * Thread-safe, process-wide facade for the bank engine.
+ *
+ * <p>The hosting API owns its lifecycle: call {@link #initialize(DBConfig, Collection)} once at
+ * startup, use {@link #getInstance()} in request handlers, and call {@link #close()} during
+ * shutdown.
+ */
+public final class BankApplication implements AutoCloseable {
+  private static final Object LIFECYCLE_LOCK = new Object();
+  private static volatile BankApplication instance;
 
-  @Override
-  protected final void servicesReady(
-      PostingService postingService,
-      AccountService accountService,
-      CustomerService customerService,
-      BalanceService balanceService,
-      FeeService feeService) {
-    postings = Objects.requireNonNull(postingService);
-    accounts = Objects.requireNonNull(accountService);
-    customers = Objects.requireNonNull(customerService);
-    balances = Objects.requireNonNull(balanceService);
-    fees = Objects.requireNonNull(feeService);
+  private final Map<Currency, UUID> cashAccounts = new ConcurrentHashMap<>();
+  private final Map<Currency, UUID> revenueAccounts = new ConcurrentHashMap<>();
+  private final DBHandler database;
+  private final PostingService postings;
+  private final AccountService accounts;
+  private final CustomerService customers;
+  private final BalanceService balances;
+  private final FeeService fees;
+  private volatile boolean closed;
+
+  private BankApplication(DBConfig config, Collection<? extends FeePolicy> feePolicies) {
+    database =
+        new DBHandler(Objects.requireNonNull(config, "Database configuration cannot be null"));
+    try {
+      AccountRepository accountRepository = new PostgresAccountRepository(database.postgres());
+      JournalEntryRepository journalRepository =
+          new PostgresJournalEntryRepository(database.postgres());
+      BalanceRepository balanceRepository = new PostgresBalanceRepository(database.postgres());
+      BalanceCache balanceCache = new RedisBalanceCache(database.redis());
+
+      accounts = new AccountService(accountRepository);
+      customers = new CustomerService(new PostgresCustomerRepository(database.postgres()));
+      balances = new BalanceService(balanceRepository, balanceCache);
+      postings = new PostingService(journalRepository, balanceCache);
+      fees =
+          new FeeService(
+              List.copyOf(
+                  Objects.requireNonNull(feePolicies, "Fee policies cannot be null")));
+    } catch (RuntimeException exception) {
+      database.close();
+      throw exception;
+    }
   }
 
-  @Override
-  protected void application(
-      PostingService postingService,
-      AccountService accountService,
-      CustomerService customerService,
-      BalanceService balanceService) {
-    // Start the production workflow or server here while the database clients remain open.
+  /** Initializes and returns the single bank engine for this process. */
+  public static BankApplication initialize(
+      DBConfig config, Collection<? extends FeePolicy> feePolicies) {
+    synchronized (LIFECYCLE_LOCK) {
+      if (instance != null) {
+        throw new IllegalStateException("Bank application is already initialized");
+      }
+      instance = new BankApplication(config, feePolicies);
+      return instance;
+    }
+  }
+
+  /** Initializes the bank engine from environment variables with no transaction fees. */
+  public static BankApplication initializeFromEnvironment() {
+    return initialize(
+        DBConfig.fromEnvironment(),
+        Arrays.stream(FeeType.values()).map(NoFeePolicy::new).toList());
+  }
+
+  /** Returns the initialized process-wide bank engine. */
+  public static BankApplication getInstance() {
+    BankApplication current = instance;
+    if (current == null || current.closed) {
+      throw new IllegalStateException("Bank application has not been initialized");
+    }
+    return current;
+  }
+
+  public static boolean isInitialized() {
+    BankApplication current = instance;
+    return current != null && !current.closed;
   }
 
   public Customer createCustomer(Customer customer) {
@@ -159,11 +218,12 @@ public class BankApplication extends DbApplication {
   }
 
   /**
-   * Register the bank-owned accounts for a currency. Call from {@link #servicesReady} or subclass
-   * constructor before any posting. Overrides must still call this map first.
+   * Registers the bank-owned accounts for a currency. The hosting API must do this during startup,
+   * before accepting posting requests for that currency.
    */
-  protected final void registerSystemAccounts(
+  public void registerSystemAccounts(
       Currency currency, UUID cashAccountId, UUID revenueAccountId) {
+    requireInitialized();
     Objects.requireNonNull(currency, "Currency cannot be null");
     Objects.requireNonNull(cashAccountId, "Cash account ID cannot be null");
     Objects.requireNonNull(revenueAccountId, "Revenue account ID cannot be null");
@@ -175,8 +235,9 @@ public class BankApplication extends DbApplication {
    * Ensures the bank-owned cash/revenue accounts exist for the currency. Idempotent via {@link
    * AccountService#ensureExists}.
    */
-  protected final void ensureSystemAccounts(
+  public void ensureSystemAccounts(
       Currency currency, String cashName, String revenueName) {
+    requireInitialized();
     Objects.requireNonNull(currency, "Currency cannot be null");
     UUID cashId = bankCashAccountId(currency);
     UUID revenueId = feeRevenueAccountId(currency);
@@ -186,7 +247,7 @@ public class BankApplication extends DbApplication {
   }
 
   /** Maps a currency to the bank-owned cash asset account. */
-  protected UUID bankCashAccountId(Currency currency) {
+  private UUID bankCashAccountId(Currency currency) {
     UUID configured = cashAccounts.get(currency);
     if (configured != null) return configured;
     throw new IllegalStateException(
@@ -196,7 +257,7 @@ public class BankApplication extends DbApplication {
   }
 
   /** Maps a currency to the bank-owned fee revenue account. */
-  protected UUID feeRevenueAccountId(Currency currency) {
+  private UUID feeRevenueAccountId(Currency currency) {
     UUID configured = revenueAccounts.get(currency);
     if (configured != null) return configured;
     throw new IllegalStateException(
@@ -205,10 +266,7 @@ public class BankApplication extends DbApplication {
             + ". Call registerSystemAccounts() in servicesReady().");
   }
 
-  /**
-   * Append-only reversal: new entry with flipped directions. Keeps original immutable per
-   * DATABASE_IMPLEMENTATION.md:41 - corrections use new reversal entries.
-   */
+  /** Append-only reversal: creates a new entry with every posting direction flipped. */
   public JournalEntry reverse(JournalEntry original, OperationMetadata metadata) {
     Objects.requireNonNull(original, "Original entry cannot be null");
     List<Posting> reversed =
@@ -224,12 +282,12 @@ public class BankApplication extends DbApplication {
         metadata, "Reversal of " + original.id() + " - " + original.description(), reversed);
   }
 
-  protected final PostingService postingService() {
+  private PostingService postingService() {
     requireInitialized();
     return postings;
   }
 
-  protected final FeeService feeService() {
+  private FeeService feeService() {
     requireInitialized();
     return fees;
   }
@@ -306,12 +364,17 @@ public class BankApplication extends DbApplication {
   }
 
   private void requireInitialized() {
-    if (postings == null
-        || accounts == null
-        || customers == null
-        || balances == null
-        || fees == null) {
-      throw new IllegalStateException("Bank application services are not initialized");
+    if (closed) throw new IllegalStateException("Bank application is closed");
+  }
+
+  /** Releases database/cache clients and allows a later initialization in the same process. */
+  @Override
+  public void close() {
+    synchronized (LIFECYCLE_LOCK) {
+      if (closed) return;
+      closed = true;
+      if (instance == this) instance = null;
+      database.close();
     }
   }
 

@@ -26,7 +26,7 @@ import java.util.concurrent.Future;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Ledger integration tests covering DATABASE_IMPLEMENTATION.md:50-56.
+ * Integration tests for journal persistence and transaction behavior.
  * Uses compose Postgres at localhost:5432 (n2bank/n2bank_local) if Testcontainers unavailable.
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
