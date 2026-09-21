@@ -5,10 +5,13 @@ import com.n2bank.domain.model.Money;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import redis.clients.jedis.RedisClient;
 
 /** Redis adapter for {@link BalanceCache}. */
 public final class RedisBalanceCache implements BalanceCache {
+  private static final Logger LOGGER = LoggerFactory.getLogger(RedisBalanceCache.class);
   private static final String KEY_PREFIX = "n2bank:balance:v1:";
 
   private final RedisClient redisClient;
@@ -26,7 +29,10 @@ public final class RedisBalanceCache implements BalanceCache {
   @Override
   public Optional<Money> find(UUID accountId) {
     Objects.requireNonNull(accountId, "Account ID cannot be null");
-    return Optional.ofNullable(redisClient.get(key(accountId))).map(moneyCodec::decode);
+    Optional<Money> balance =
+        Optional.ofNullable(redisClient.get(key(accountId))).map(moneyCodec::decode);
+    LOGGER.info("Balance cache {} for account {}", balance.isPresent() ? "hit" : "miss", accountId);
+    return balance;
   }
 
   @Override
@@ -35,12 +41,15 @@ public final class RedisBalanceCache implements BalanceCache {
     Objects.requireNonNull(balance, "Balance cannot be null");
 
     redisClient.set(key(accountId), moneyCodec.encode(balance));
+    LOGGER.info("Balance cached for account {}", accountId);
   }
 
   @Override
   public void invalidate(UUID accountId) {
     Objects.requireNonNull(accountId, "Account ID cannot be null");
+
     redisClient.del(key(accountId));
+    LOGGER.info("Balance cache invalidated for account {}", accountId);
   }
 
   private String key(UUID accountId) {

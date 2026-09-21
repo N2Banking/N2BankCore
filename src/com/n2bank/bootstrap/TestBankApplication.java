@@ -132,5 +132,8 @@ public final class TestBankApplication extends BankApplication {
         balanceService.getBalance(secondDepositAccount.accountId()),
         balanceService.getBalance(cashAccount.accountId()),
         balanceService.getBalance(feeRevenueAccount.accountId()));
+    System.out.printf(
+        "Cached balance check: Alice=%s%n",
+        balanceService.getBalance(firstDepositAccount.accountId()));
   }
 }
