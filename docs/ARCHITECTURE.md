@@ -19,6 +19,33 @@ N² Bank Core runs inside its host backend's Java process. The host calls the li
 
 The domain uses Java types rather than JDBC or Redis clients. Application services depend on port interfaces. The facade explicitly wires the concrete PostgreSQL and Redis adapters; it is not a configurable dependency-injection container.
 
+### Dependency direction
+
+Dependencies point inward — the domain has no outward imports. Wiring flows outward from the facade.
+
+```mermaid
+flowchart TD
+    Domain["domain.model<br/>Money · Posting · JournalEntry<br/>Account · Customer<br/><i>no external deps</i>"]
+    Ports["application.port<br/>JournalEntryRepository · AccountRepository<br/>BalanceRepository · BalanceCache"]
+    Services["application.service + application.fee<br/>PostingService · BalanceService · FeeService<br/>FeePolicy"]
+    InfraPG["infrastructure.postgres<br/>PostgresJournalEntryRepository<br/>PostgresBalanceRepository"]
+    InfraRedis["infrastructure.redis<br/>RedisBalanceCache<br/>TTL 30s"]
+    InfraDB["infrastructure.database<br/>DBHandler · DBConfig"]
+    Bootstrap["bootstrap<br/>BankApplication facade"]
+
+    Domain --> Ports
+    Ports --> Services
+    Services --> Bootstrap
+    InfraPG -. implements .-> Ports
+    InfraRedis -. implements .-> Ports
+    InfraDB --> Bootstrap
+    Bootstrap --> InfraPG
+    Bootstrap --> InfraRedis
+    Bootstrap --> InfraDB
+```
+
+*Reading:* arrows = `depends on / uses`. Concrete adapters implement port interfaces; the facade owns client lifecycle.
+
 ## Posting flow
 
 1. The facade checks operation-specific inputs, selects a fee policy where applicable, and constructs a journal entry. Transfer, withdrawal, and fee-charge calls also perform a preliminary balance check.
@@ -30,11 +57,57 @@ The domain uses Java types rather than JDBC or Redis clients. Application servic
 
 This separation matters: cache invalidation is outside the database transaction, and constructor validation alone cannot establish whether referenced accounts exist.
 
+```mermaid
+sequenceDiagram
+    actor Host as Host backend
+    participant Facade as BankApplication
+    participant JE as JournalEntry ctor
+    participant PS as PostingService
+    participant PG as PostgresJournalEntryRepository
+    participant Redis as RedisBalanceCache
+
+    Host->>Facade: deposit / transfer / withdraw + OperationMetadata
+    Facade->>Facade: requireFunds prelim + FeeService.calculate
+    Facade->>JE: new JournalEntry id, effectiveAt, postings
+    JE-->>Facade: validates >=2 postings<br/>one currency, debits == credits
+    Facade->>PS: post entry, idempotencyKey
+    PS->>PG: append entry, key
+
+    alt idempotency key exists
+        PG->>PG: SELECT by key + requireSameRequest<br/>compare amounts via compareTo
+        PG-->>PS: return stored entry
+        PS-->>Facade: stored entry
+    else new key
+        PG->>PG: BEGIN
+        PG->>PG: SELECT accounts FOR UPDATE<br/>enforceSufficientFunds
+        PG->>PG: INSERT journal_entries + postings<br/>COMMIT
+        Note over PG: DEFERRED trigger validate_complete_journal_entry<br/>at COMMIT checks balanced + currency + account-currency
+        PG-->>PS: committed entry
+        PS->>Redis: invalidate each affected account<br/>best-effort outside tx
+        PS-->>Facade: new entry
+    end
+```
+
+*Cache invalidation never turns a committed entry into a failure; a `Redis` error is logged (`PostingService.java:41`).*
+
 ## Read flow
 
 `getBalance` checks Redis first, then calculates a balance through PostgreSQL on a miss or cache error. Successful database reads are cached on a best-effort basis. Statements and trial balances bypass Redis.
 
 Balances sum persisted postings. The account type determines the normal sign; see [Accounting model](LEDGER.md). The balance query has no effective-date cutoff, so even a future-dated stored entry participates in the current balance.
+
+```mermaid
+flowchart TD
+    A["getBalance accountId<br/>BalanceService"] --> B{"cache.find?"}
+    B -- "hit" --> C["return cached Money"]
+    B -- "miss / Redis error" --> D["Postgres SELECT balance<br/>accounts LEFT JOIN postings<br/>CASE debit-minus-credit vs credit-minus-debit"]
+    D --> E["cache.put TTL 30s<br/>best-effort"]
+    E --> F["return authoritative balance"]
+    G["statement / trialBalance<br/>BalanceService"] -. "bypass cache<br/>avoid stale reads" .-> D
+    H["effectiveAt in future"] -. "still counted<br/>filter is statement-only" .-> D
+```
+
+*`statement()` and `trialBalance()` always hit Postgres; `getBalance()` is the only cached path.*
 
 ## Host responsibilities
 

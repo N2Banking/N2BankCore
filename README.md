@@ -105,5 +105,6 @@ This builds the JAR and installs `com.n2bank:n2bank-core:0.1.0-SNAPSHOT` into yo
 | [Architecture](docs/ARCHITECTURE.md) | Navigate the source and understand component responsibilities |
 | [Invariants](docs/INVARIANTS.md) | Inspect enforcement boundaries and supporting evidence |
 | [Testing](docs/TESTING.md) | Run tests safely and understand what they cover |
+| [Diagrams](docs/DIAGRAMS.md) | Visual index of all Mermaid charts across the guides |
 
 There is no bundled backend server, payment-rail integration, recurring fee scheduler, or versioned database migration system.

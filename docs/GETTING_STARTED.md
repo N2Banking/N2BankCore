@@ -4,6 +4,17 @@
 
 This walkthrough builds the library and runs a Java caller. It starts no backend server.
 
+```mermaid
+flowchart LR
+    A["1. Build<br/>JDK 25 mvn -DskipTests install"] --> B["2. Services<br/>docker compose up -d<br/>PG17 + Redis8 healthy"]
+    B --> C["3. Config<br/>export DB_URL DB_USER<br/>DB_PASSWORD REDIS_URI<br/>Java never loads .env"]
+    C --> D["4. Schema once<br/>schema.sql on empty DB<br/>inspect if tables exist"]
+    D --> E["5. Run example<br/>LibraryExample deposit 100<br/>transfer 25"]
+    E --> F["Observe<br/>Alice DEBIT 25<br/>Bob CREDIT 25"]
+    B -.-> G["Wait PG healthy<br/>docker compose ps"]
+    C -.-> H["Match compose volumes<br/>if credentials changed"]
+```
+
 ## 1. Build
 
 Use JDK 25 or newer, Maven on your PATH, and Docker Compose for local services. From the repository root:
@@ -102,6 +113,25 @@ Bob CREDIT EUR 25.00
 The example writes to the configured database. Each run creates new customers/accounts and operation keys; its two system-account IDs stay fixed. A backend retains the initialized facade for its full serving lifetime rather than the duration of this example.
 
 ## Troubleshooting
+
+```mermaid
+flowchart TD
+    S["Symptom"] --> Q1{"Cannot compile release 25?"}
+    Q1 -- yes --> R1["mvn -version uses JDK 25+"]
+    Q1 -- no --> Q2{"PG connection fails?"}
+    Q2 -- yes --> R2["docker compose ps healthy?<br/>exported DB_URL/USER/PASSWORD match compose?"]
+    Q2 -- no --> Q3{"Relation does not exist?"}
+    Q3 -- yes --> R3["Apply schema.sql to DB at DB_URL"]
+    Q3 -- no --> Q4{"Tables already exist?"}
+    Q4 -- yes --> R4["Do not drop; inspect; baseline only for empty DB"]
+    Q4 -- no --> Q5{"Redis unavailable?"}
+    Q5 -- yes --> R5["Best-effort cache; but init still needs REDIS_URI"]
+    Q5 -- no --> Q6{"No system account?"}
+    Q6 -- yes --> R6["registerSystemAccounts + ensureSystemAccounts per currency"]
+    Q6 -- no --> Q7{"Already initialized?"}
+    Q7 -- yes --> R7["Reuse getInstance; close only at shutdown"]
+    Q7 -- no --> R8["Check logs; see TESTING.md for dedicated DB"]
+```
 
 | Symptom | Check |
 | --- | --- |

@@ -4,6 +4,25 @@
 
 The suite consists of service tests using doubles and PostgreSQL tests using an external database.
 
+```mermaid
+flowchart TD
+    subgraph Service["Service lane — no DB, no Redis"]
+        S1["PostingServiceTest<br/>doubles + NoOpBalanceCache"] --> S2["cache failure after append<br/>invalidation on retry"]
+        S2 --> S3["mvn -Dtest=PostingServiceTest test"]
+    end
+
+    subgraph Integration["Integration lane — disposable DB"]
+        I1["docker compose up -d"] --> I2["createdb n2bank_test<br/>disposable only"]
+        I2 --> I3["DBConfig.fromEnvironment<br/>Direct JDBC, Testcontainers not auto-started"]
+        I3 --> I4["mvn test or -Dtest=PostgresJournalEntryRepositoryTest"]
+        I4 --> I5["Setup drops+recreates 4 tables+functions<br/>truncate between tests"]
+        I5 --> I6["covers: valid persist, missing account, currency mismatch,<br/>identical retry, conflicting retry, duplicate id,<br/>concurrent same-key, funds checks, scale compareTo, statements"]
+        I6 --> I7["gaps: Money arithmetic, ctor rejection,<br/>fee policies, facade lifecycle, live Redis, mutation rejection"]
+        I7 --> I8["target/surefire-reports 14 tests total"]
+    end
+    Service -. separate .-> Integration
+```
+
 ## Service tests without a database
 
 ```sh

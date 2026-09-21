@@ -20,6 +20,45 @@ These are bounded implementation rules, not a claim of production readiness. “
 
 The test names below belong to [PostgresJournalEntryRepositoryTest](../src/test/java/com/n2bank/infrastructure/postgres/PostgresJournalEntryRepositoryTest.java), except where a service test is linked.
 
+```mermaid
+flowchart TB
+    subgraph Ctor["In-memory ctor checks<br/>no DB"]
+        C1["Money rejects nulls"]
+        C2["Posting amount > 0"]
+        C3["JournalEntry >=2 one ccy debits==credits<br/>List.copyOf immutable"]
+    end
+
+    subgraph Tx["Repository transaction<br/>PostgresJournalEntryRepository.append"]
+        T1["SELECT accounts FOR UPDATE<br/>missing account -> rollback"]
+        T2["enforceSufficientFunds<br/>oldBalance + netChange >=0 per affected type"]
+        T3["INSERT journal_entries + postings"]
+    end
+
+    subgraph Schema["Schema DEFERRED + triggers<br/>at COMMIT"]
+        S1["validate_complete_journal_entry<br/>count>=2 contiguous 0..n one ccy<br/>account currency match debits==credits"]
+        S2["reject_journal_mutation<br/>UPDATE/DELETE on journal/postings"]
+        S3["require_posting_in_entry_transaction<br/>postings only in creating XID8"]
+        S4["PK idempotency_key UNIQUE<br/>+ duplicate id 23505 handling"]
+    end
+
+    subgraph Cache["Cache best-effort<br/>RedisBalanceCache"]
+        K1["invalidate after commit<br/>failure logged not failed op"]
+        K2["TTL 30s stale refill possible"]
+    end
+
+    subgraph NotCovered["Not prevented / gaps"]
+        N1["TRUNCATE / DDL / trigger drop"]
+        N2["Direct SQL bypasses funds check"]
+        N3["Unsorted lock order -> deadlock possible"]
+        N4["Stale cache can fail facade requireFunds before append"]
+    end
+
+    Ctor --> Tx --> Schema
+    Tx --> Cache
+    Schema -. does not prevent .-> NotCovered
+    Cache -. allows .-> NotCovered
+```
+
 | Rule | Enforcement | Test or coverage limit |
 | --- | --- | --- |
 | Referenced accounts exist | Repository lookup and schema foreign keys | `missingAccountsShouldRollback` |
