@@ -112,7 +112,7 @@ public final class PostgresAccountRepository implements AccountRepository {
     }
   }
 
-  private Optional<Account> findById(Connection connection, UUID accountId) throws SQLException {
+  Optional<Account> findById(Connection connection, UUID accountId) throws SQLException {
     try (PreparedStatement statement = connection.prepareStatement(SELECT_ACCOUNT_BY_ID)) {
       statement.setObject(1, accountId);
       try (ResultSet rows = statement.executeQuery()) {

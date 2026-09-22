@@ -62,7 +62,7 @@ public class PostgresJournalEntryRepositoryTest {
     String schema = Files.readString(Path.of("database/schema.sql"));
     try (Connection c = dataSource.getConnection(); Statement st = c.createStatement()) {
       // Clean slate: drop existing objects if any (tables + functions) then recreate
-      try { st.execute("DROP TABLE IF EXISTS postings, journal_entries, accounts, customers CASCADE"); } catch (Exception ignore) {}
+      try { st.execute("DROP TABLE IF EXISTS operations, postings, journal_entries, accounts, customers CASCADE"); } catch (Exception ignore) {}
       try { st.execute("DROP FUNCTION IF EXISTS reject_journal_mutation() CASCADE"); } catch (Exception ignore) {}
       try { st.execute("DROP FUNCTION IF EXISTS require_posting_in_entry_transaction() CASCADE"); } catch (Exception ignore) {}
       try { st.execute("DROP FUNCTION IF EXISTS validate_complete_journal_entry() CASCADE"); } catch (Exception ignore) {}

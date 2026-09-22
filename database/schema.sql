@@ -31,6 +31,15 @@ CREATE TABLE journal_entries (
     created_in_transaction XID8 NOT NULL DEFAULT pg_current_xact_id()
 );
 
+-- A claim cannot commit without its journal entry. Both rows are inserted in one transaction.
+CREATE TABLE operations (
+    idempotency_key VARCHAR(255) PRIMARY KEY
+        REFERENCES journal_entries (idempotency_key) DEFERRABLE INITIALLY DEFERRED,
+    operation_type VARCHAR(32) NOT NULL CHECK (operation_type IN ('TRANSFER', 'DEPOSIT', 'WITHDRAWAL', 'CHARGE_FEE', 'REVERSAL')),
+    request_fingerprint VARCHAR(64) NOT NULL CHECK (request_fingerprint ~ '^[0-9a-f]{64}$'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE postings (
     journal_entry_id UUID NOT NULL REFERENCES journal_entries (id),
     posting_index INTEGER NOT NULL CHECK (posting_index >= 0),
@@ -62,6 +71,10 @@ FOR EACH ROW EXECUTE FUNCTION reject_journal_mutation();
 
 CREATE TRIGGER postings_are_append_only
 BEFORE UPDATE OR DELETE ON postings
+FOR EACH ROW EXECUTE FUNCTION reject_journal_mutation();
+
+CREATE TRIGGER operations_are_append_only
+BEFORE UPDATE OR DELETE ON operations
 FOR EACH ROW EXECUTE FUNCTION reject_journal_mutation();
 
 CREATE FUNCTION require_posting_in_entry_transaction()

@@ -1,5 +1,6 @@
 package com.n2bank.bootstrap;
 
+import com.n2bank.application.command.*;
 import com.n2bank.application.fee.FeeContext;
 import com.n2bank.application.fee.FeePolicy;
 import com.n2bank.application.fee.NoFeePolicy;
@@ -39,6 +40,11 @@ public final class BankApplication implements AutoCloseable {
   private final CustomerService customers;
   private final BalanceService balances;
   private final FeeService fees;
+  private final TransferHandler transferHandler;
+  private final DepositHandler depositHandler;
+  private final WithdrawalHandler withdrawalHandler;
+  private final ChargeFeeHandler chargeFeeHandler;
+  private final ReversalHandler reversalHandler;
   private volatile boolean closed;
 
   private BankApplication(DBConfig config, Collection<? extends FeePolicy> feePolicies) {
@@ -59,6 +65,14 @@ public final class BankApplication implements AutoCloseable {
           new FeeService(
               List.copyOf(
                   Objects.requireNonNull(feePolicies, "Fee policies cannot be null")));
+      var executor = new OperationExecutor(
+          new com.n2bank.infrastructure.postgres.PostgresOperationRepository(database.postgres()),
+          balanceCache);
+      transferHandler = new TransferHandler(executor, fees, this::feeRevenueAccountId);
+      depositHandler = new DepositHandler(executor, fees, this::feeRevenueAccountId, this::bankCashAccountId);
+      withdrawalHandler = new WithdrawalHandler(executor, fees, this::feeRevenueAccountId, this::bankCashAccountId);
+      chargeFeeHandler = new ChargeFeeHandler(executor, this::feeRevenueAccountId);
+      reversalHandler = new ReversalHandler(executor);
     } catch (RuntimeException exception) {
       database.close();
       throw exception;
@@ -123,6 +137,27 @@ public final class BankApplication implements AutoCloseable {
     return balanceService().statement(accountId, from, to);
   }
 
+  public OperationResult deposit(DepositCommand command) {
+    requireInitialized();
+    return depositHandler.handle(command);
+  }
+
+  public OperationResult withdraw(WithdrawalCommand command) {
+    requireInitialized();
+    return withdrawalHandler.handle(command);
+  }
+
+  public OperationResult chargeFee(ChargeFeeCommand command) {
+    requireInitialized();
+    return chargeFeeHandler.handle(command);
+  }
+
+  public OperationResult reverse(ReversalCommand command) {
+    requireInitialized();
+    return reversalHandler.handle(command);
+  }
+  /** Legacy entry-based overload; prefer DepositCommand. */
+  @Deprecated
   public JournalEntry deposit(UUID accountId, Money amount, OperationMetadata metadata) {
     requirePositive(amount);
     Account customer = requireCustomerAccount(accountId, amount.currency());
@@ -148,6 +183,14 @@ public final class BankApplication implements AutoCloseable {
   }
 
   /** The transfer amount is the total sender debit; the receiver obtains amount minus fee. */
+  public com.n2bank.application.command.OperationResult transfer(
+      com.n2bank.application.command.TransferCommand command) {
+    requireInitialized();
+    return transferHandler.handle(command);
+  }
+
+  /** Legacy entry-based transfer. Prefer {@link #transfer(com.n2bank.application.command.TransferCommand)}. */
+  @Deprecated
   public JournalEntry transfer(
       UUID sourceAccountId, UUID destinationAccountId, Money amount, OperationMetadata metadata) {
     requirePositive(amount);
@@ -181,6 +224,7 @@ public final class BankApplication implements AutoCloseable {
         lines);
   }
 
+  @Deprecated
   public JournalEntry withdraw(UUID accountId, Money amount, OperationMetadata metadata) {
     requirePositive(amount);
     Account customer = requireCustomerAccount(accountId, amount.currency());
@@ -201,6 +245,7 @@ public final class BankApplication implements AutoCloseable {
     return post(metadata, "Cash withdrawal with " + fee.description(), lines);
   }
 
+  @Deprecated
   public JournalEntry chargeFee(
       UUID accountId, Money fee, String description, OperationMetadata metadata) {
     requirePositive(fee);
@@ -253,7 +298,7 @@ public final class BankApplication implements AutoCloseable {
     throw new IllegalStateException(
         "No bank cash account configured for "
             + currency
-            + ". Call registerSystemAccounts() in servicesReady().");
+            + ". Call registerSystemAccounts() during startup, before accepting requests for this currency.");
   }
 
   /** Maps a currency to the bank-owned fee revenue account. */
@@ -263,10 +308,11 @@ public final class BankApplication implements AutoCloseable {
     throw new IllegalStateException(
         "No bank fee revenue account configured for "
             + currency
-            + ". Call registerSystemAccounts() in servicesReady().");
+            + ". Call registerSystemAccounts() during startup, before accepting requests for this currency.");
   }
 
   /** Append-only reversal: creates a new entry with every posting direction flipped. */
+  @Deprecated
   public JournalEntry reverse(JournalEntry original, OperationMetadata metadata) {
     Objects.requireNonNull(original, "Original entry cannot be null");
     List<Posting> reversed =

@@ -18,7 +18,7 @@ These are bounded implementation rules, not a claim of production readiness. “
 
 ## Persistence and service rules
 
-The test names below belong to [PostgresJournalEntryRepositoryTest](../src/test/java/com/n2bank/infrastructure/postgres/PostgresJournalEntryRepositoryTest.java), except where a service test is linked.
+The test names below belong to [PostgresJournalEntryRepositoryTest](../src/test/java/com/n2bank/infrastructure/postgres/PostgresJournalEntryRepositoryTest.java), except where a service test or [PostgresOperationRepositoryTest](../src/test/java/com/n2bank/infrastructure/postgres/PostgresOperationRepositoryTest.java) is linked.
 
 ```mermaid
 flowchart TB
@@ -36,9 +36,10 @@ flowchart TB
 
     subgraph Schema["Schema DEFERRED + triggers<br/>at COMMIT"]
         S1["validate_complete_journal_entry<br/>count>=2 contiguous 0..n one ccy<br/>account currency match debits==credits"]
-        S2["reject_journal_mutation<br/>UPDATE/DELETE on journal/postings"]
+        S2["reject_journal_mutation<br/>UPDATE/DELETE on journal/postings/operations"]
         S3["require_posting_in_entry_transaction<br/>postings only in creating XID8"]
         S4["PK idempotency_key UNIQUE<br/>+ duplicate id 23505 handling"]
+        S5["operations DEFERRED FK<br/>claim cannot commit without entry<br/>fingerprint conflict -> exception"]
     end
 
     subgraph Cache["Cache best-effort<br/>RedisBalanceCache"]
@@ -49,7 +50,7 @@ flowchart TB
     subgraph NotCovered["Not prevented / gaps"]
         N1["TRUNCATE / DDL / trigger drop"]
         N2["Direct SQL bypasses funds check"]
-        N3["Unsorted lock order -> deadlock possible"]
+        N3["Load workload is bounded<br/>no capacity guarantee"]
         N4["Stale cache can fail facade requireFunds before append"]
     end
 
@@ -68,16 +69,26 @@ flowchart TB
 | One entry ID cannot be reused under a different key | Database primary key and repository error handling | `duplicateEntryIdWithDifferentKeyMustFail` |
 | Retry amounts compare numerically across decimal scales | Repository uses `BigDecimal.compareTo` | `scaleNormalizationSameAmountDifferentScaleIsIdempotent` |
 | Repository appends reject negative resulting normal balances | Account row locks and balance calculation in the append transaction | `insufficientFundsInsideTransactionPreventsOverdraft`, `concurrentOverdraftOnlyOneSucceeds` |
-| Journal/posting updates and deletes are rejected; late posting inserts are rejected | [Schema triggers](../database/schema.sql) | No dedicated mutation/late-insert tests |
+| Journal/posting/operation updates and deletes are rejected; late posting inserts are rejected | [Schema triggers](../database/schema.sql) | No dedicated mutation/late-insert tests |
 | Cache invalidation failure does not fail a committed posting | [PostingService](../src/main/java/com/n2bank/application/service/PostingService.java) | [PostingServiceTest](../src/test/java/com/n2bank/application/service/PostingServiceTest.java) uses test doubles |
+| A command claim cannot commit without its journal entry | Deferred foreign key `operations` → `journal_entries` in [schema](../database/schema.sql) | `claimCannotCommitWithoutJournal` in [PostgresOperationRepositoryTest](../src/test/java/com/n2bank/infrastructure/postgres/PostgresOperationRepositoryTest.java) |
+| The same key with different input is rejected | Fingerprint comparison in [PostgresOperationRepository](../src/main/java/com/n2bank/infrastructure/postgres/PostgresOperationRepository.java) | `differentInputWithSameKeyConflicts`, `simultaneousDifferentPayloadsHaveOneWinner` |
+| Failed commands leave no claim, so a retry can execute | Claim and journal roll back in one transaction | `insufficientFundsRollsBackClaimAndJournal` |
+| Committed replays skip fee recalculation and funds rechecks | Stored entry returned on type/fingerprint match | `fullBalanceReplayReturnsOriginalWithoutRecalculatingFees`, `allHandlersPostFeesAndReplayTheirOriginalResults` |
+| Concurrent same-key commands commit once | `operations.idempotency_key` primary key arbitrates claims | `simultaneousRetriesCommitOneTransfer` |
+| Reversal loads its original; a missing original consumes no key | [ReversalHandler](../src/main/java/com/n2bank/application/service/ReversalHandler.java) | `missingReversalOriginalDoesNotConsumeKey` |
+| Every append locks distinct affected accounts in the same UUID order | `enforceSufficientFunds` in [PostgresJournalEntryRepository](../src/main/java/com/n2bank/infrastructure/postgres/PostgresJournalEntryRepository.java) | No dedicated lock-order test |
+| Command transactions retry deadlocks up to three total attempts; other errors fail immediately | Retry loop in [PostgresOperationRepository](../src/main/java/com/n2bank/infrastructure/postgres/PostgresOperationRepository.java) | `retriesWrappedDeadlocksAndCommitsOneTransfer`, `exhaustedDeadlocksLeaveKeyReusable`, `otherErrorsAreNotRetried`, `interruptionStopsRetries` in [DeadlockRetryTest](../src/test/java/com/n2bank/infrastructure/postgres/DeadlockRetryTest.java) |
+| Concurrent duplicate submissions commit once with identical replays and exact balances | Key claim plus fingerprint comparison under 16 workers | `transfersAndDuplicatesPreserveEveryBalance` in [BankingLoadTest](../src/test/java/com/n2bank/infrastructure/postgres/BankingLoadTest.java) |
+| Competing transfers cannot overspend a shared balance; losers leave no claim | Funds check with single-transaction rollback | `competingTransfersCannotOverspendSharedBalance` in [BankingLoadTest](../src/test/java/com/n2bank/infrastructure/postgres/BankingLoadTest.java) |
 
 ## Boundaries that matter
 
 **Append-only is a schema behavior.** Row-level update/delete triggers do not prevent `TRUNCATE`, privileged schema changes, or trigger removal. They do not freeze customer/account records. The test suite itself truncates tables between tests.
 
-**Funds checks belong to the repository path.** The current adapter rejects a negative normal balance for every affected account type. Direct SQL bypasses that application-level funds check. Account lock order is not explicitly sorted and there is no automatic deadlock retry loop.
+**Funds checks belong to the repository path.** The current adapter rejects a negative normal balance for every affected account type. Direct SQL bypasses that application-level funds check. Every journal append locks distinct affected accounts in Java UUID natural order before reading balances. Command transactions retry deadlocks up to three total attempts; deprecated overloads do not automatically retry.
 
-**Idempotency belongs to append.** Facade validation happens first. A replayed withdrawal or transfer can fail its preliminary balance check even when its original entry already exists. Changed fee configuration can also change the generated entry. See [retry semantics](INTEGRATION.md#retry-semantics).
+**Idempotency belongs to append — on the legacy path.** Deprecated `OperationMetadata` overloads validate at the facade first: a replayed withdrawal or transfer can fail its preliminary balance check even when its original entry already exists, and changed fee configuration can change the generated entry. See [retry semantics](INTEGRATION.md#retry-semantics). Command overloads instead claim the key before fee calculation and funds checks, so a committed replay returns the stored entry unchanged. See [command idempotency](OPERATIONS.md).
 
 **Caching allows stale reads.** Invalidation and the 30-second default TTL do not make reads strongly consistent. A concurrent reader can refill an old balance after invalidation; a stale low balance can reject an operation before repository append.
 

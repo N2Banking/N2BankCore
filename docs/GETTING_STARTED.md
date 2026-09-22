@@ -80,7 +80,7 @@ docker compose cp database/schema.sql postgres:/tmp/n2bank-schema.sql
 docker compose exec -T postgres psql -U n2bank -d n2bank -v ON_ERROR_STOP=1 -f /tmp/n2bank-schema.sql
 ```
 
-Substitute the database/user if customized. This baseline creates tables and functions; it is not an upgrade script. If tables already exist, inspect the database rather than dropping it.
+Substitute the database/user if customized. This baseline creates tables and functions; it is not an upgrade script. If tables already exist, inspect the database rather than dropping it. Databases created before the `operations` table existed instead apply the manual scripts in `database/migrations/` — see [schema installation](OPERATIONS.md#schema-installation).
 
 ## 4. Run the example
 

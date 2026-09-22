@@ -46,15 +46,16 @@ One process-wide facade connects the operation services to their persistence and
 With the library initialized, accounts funded, and system accounts registered:
 
 ```java
-// Create once per logical operation; retain these values for a retry.
-var metadata = new BankApplication.OperationMetadata(
-    UUID.randomUUID(),
-    Instant.now(),
-    "payment-4821",
-    new IdempotencyKey("payment-4821"));
+// Create once per logical operation; retain the key and inputs for a retry.
+var command = new TransferCommand(
+    new IdempotencyKey("payment-4821"),
+    aliceAccountId, bobAccountId,
+    new Money("125.00", "EUR"), "payment-4821");
 
-JournalEntry entry = bank.transfer(
-    aliceAccountId, bobAccountId, new Money("125.00", "EUR"), metadata);
+OperationResult result = bank.transfer(command);
+JournalEntry entry = result.journalEntry();
+// A retry with the same key and inputs returns the original entry;
+// result.replayed() identifies the replay.
 ```
 
 With zero fees, the entry records:
@@ -67,7 +68,7 @@ With zero fees, the entry records:
 
 A debit reduces Alice's liability balance; a credit increases Bob's. With a transfer fee, the sender is still debited EUR 125.00 and the recipient receives that amount minus the fee.
 
-See the [complete integration example](docs/examples/LibraryExample.java) for imports, initialization, account creation, funding, and shutdown. [Retry behavior](docs/INTEGRATION.md#retry-semantics) differs between repository appends and facade operations.
+See the [complete integration example](docs/examples/LibraryExample.java) for imports, initialization, account creation, funding, and shutdown. [Retry behavior](docs/INTEGRATION.md#retry-semantics) differs between command replay and the deprecated entry-based overloads.
 
 ## Included in the library
 
@@ -78,7 +79,7 @@ See the [complete integration example](docs/examples/LibraryExample.java) for im
 | Banking operations | Deposits, transfers, withdrawals, explicit fee charges, and reversal entries |
 | Persistence | PostgreSQL customer, account, journal, balance, and statement adapters |
 | Reads | Account balances, complete entries in date-bounded statements, and totals by account type and currency |
-| Retry handling | Matching repository appends reuse the stored entry under a unique idempotency key |
+| Retry handling | Deposit, transfer, withdrawal, fee and reversal commands atomically claim a key and replay the committed result; legacy methods retain entry-based retry behavior. See [operation idempotency](docs/OPERATIONS.md). |
 | Cache | Redis balance reads with a default 30-second TTL and invalidation after journal commits |
 
 The [invariants guide](docs/INVARIANTS.md) links these rules to implementation and distinguishes existing tests from coverage gaps. There is one logical ledger per database, with no tenant or ledger identifier.
@@ -101,10 +102,11 @@ This builds the JAR and installs `com.n2bank:n2bank-core:0.1.0-SNAPSHOT` into yo
 | --- | --- |
 | [Getting started](docs/GETTING_STARTED.md) | Build locally, configure services, and execute the library example |
 | [Backend integration](docs/INTEGRATION.md) | Manage lifecycle, account setup, operations, fees, retries, and errors |
+| [Operations and idempotency](docs/OPERATIONS.md) | Claim keys, replay results, fingerprints, and upgrade the schema |
 | [Accounting model](docs/LEDGER.md) | Understand money, postings, balance signs, and reversals |
 | [Architecture](docs/ARCHITECTURE.md) | Navigate the source and understand component responsibilities |
 | [Invariants](docs/INVARIANTS.md) | Inspect enforcement boundaries and supporting evidence |
 | [Testing](docs/TESTING.md) | Run tests safely and understand what they cover |
 | [Diagrams](docs/DIAGRAMS.md) | Visual index of all Mermaid charts across the guides |
 
-There is no bundled backend server, payment-rail integration, recurring fee scheduler, or versioned database migration system.
+There is no bundled backend server, payment-rail integration, recurring fee scheduler, or automatic migration runner. Fresh databases apply `database/schema.sql`; existing databases apply the manual scripts in `database/migrations/` — see [schema installation](docs/OPERATIONS.md#schema-installation).

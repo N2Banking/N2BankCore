@@ -44,7 +44,7 @@ For every supported currency:
 2. Call `registerSystemAccounts(currency, cashId, revenueId)`.
 3. Call `ensureSystemAccounts(currency, cashName, revenueName)`.
 
-Registration holds an in-memory mapping; repeat it on each startup. It does not itself create or validate database accounts. Deposit, transfer, and withdrawal require a fee-revenue account even with zero fees.
+Registration holds an in-memory mapping; repeat it on each startup. It does not itself create or validate database accounts. Deposit, legacy transfer, and withdrawal require a fee-revenue account even with zero fees. Command transfers require that account only when a fee is charged.
 
 Create customers before owned accounts. Banking operations require owned `LIABILITY` customer accounts; bank cash is an unowned `ASSET` and fee revenue is unowned `REVENUE`. Reusing a customer/account ID with different data fails through the facade.
 
@@ -52,21 +52,21 @@ Handlers can use the retained instance or `getInstance()`. Drain requests before
 
 ## Operation semantics
 
-Here, A is the requested amount and F is the calculated fee.
+Call the command overloads (`deposit(DepositCommand)`, `transfer(TransferCommand)`, `withdraw(WithdrawalCommand)`, `chargeFee(ChargeFeeCommand)`, `reverse(ReversalCommand)`); each returns an `OperationResult` with the committed entry and a replay flag. Here, A is the requested amount and F is the calculated fee.
 
-| Method | Postings | Behavior |
+| Command | Postings | Behavior |
 | --- | --- | --- |
-| `deposit` | Cash debit A; customer credit A − F; revenue credit F | A > 0 and F < A |
-| `transfer` | Sender debit A; recipient credit A − F; revenue credit F | Distinct customer accounts; A > 0 and F < A |
-| `withdraw` | Customer debit A + F; cash credit A; revenue credit F | Requested cash amount excludes the fee |
-| `chargeFee` | Customer debit fee; revenue credit fee | Uses the supplied positive amount directly |
-| `reverse` | New entry with every direction flipped | Uses the supplied entry; does not load or verify the original |
+| `DepositCommand` | Cash debit A; customer credit A − F; revenue credit F | A > 0 and F < A |
+| `TransferCommand` | Sender debit A; recipient credit A − F; revenue credit F | Distinct customer accounts; A > 0 and F < A |
+| `WithdrawalCommand` | Customer debit A + F; cash credit A; revenue credit F | Requested cash amount excludes the fee |
+| `ChargeFeeCommand` | Customer debit fee; revenue credit fee | Uses the supplied positive amount directly |
+| `ReversalCommand` | New entry with every direction flipped | Loads the original inside the transaction and rejects a missing one |
 
 Zero-fee revenue postings are omitted. Account and amount currencies must agree. These methods record accounting entries; they do not initiate external cash handling or payment-rail transfers.
 
 ```mermaid
 flowchart LR
-    subgraph Deposit["deposit accountId, Money A"]
+    subgraph Deposit["deposit DepositCommand"]
         D1["Fee F = FeeService CASH_DEPOSIT<br/>credited = A - F<br/>require F < A"] --> D2["cash ASSET DEBIT A"]
         D1 --> D3["customer LIABILITY CREDIT A-F"]
         D1 --> D4{"F isZero?"}
@@ -74,28 +74,33 @@ flowchart LR
         D4 -- yes --> D6["no revenue posting"]
     end
 
-    subgraph Transfer["transfer src, dst, Money A"]
-        T1["Fee F = TRANSFER<br/>received = A - F<br/>requireFunds src A"] --> T2["src DEBIT A"]
+    subgraph Transfer["transfer TransferCommand"]
+        T1["Fee F = TRANSFER<br/>received = A - F<br/>funds check in tx"] --> T2["src DEBIT A"]
         T1 --> T3["dst CREDIT A-F"]
         T1 --> T4{"F isZero?"}
         T4 -- no --> T5["revenue CREDIT F"]
         T4 -- yes --> T6["no revenue posting"]
     end
 
-    subgraph Withdraw["withdraw accountId, Money A"]
-        W1["Fee F = WITHDRAWAL<br/>total = A + F<br/>requireFunds A+F"] --> W2["customer DEBIT A+F"]
+    subgraph Withdraw["withdraw WithdrawalCommand"]
+        W1["Fee F = WITHDRAWAL<br/>total = A + F"] --> W2["customer DEBIT A+F"]
         W1 --> W3["cash ASSET CREDIT A"]
         W1 --> W4{"F isZero?"}
         W4 -- no --> W5["revenue CREDIT F"]
     end
 
-    subgraph ChargeFee["chargeFee accountId, Money fee"]
-        C1["explicit fee, not via FeePolicy<br/>requireFunds fee"] --> C2["customer DEBIT fee"]
+    subgraph ChargeFee["chargeFee ChargeFeeCommand"]
+        C1["explicit fee, not via FeePolicy"] --> C2["customer DEBIT fee"]
         C1 --> C3["revenue CREDIT fee"]
+    end
+
+    subgraph Reverse["reverse ReversalCommand"]
+        R1["load original by id<br/>missing -> reject, key free"] --> R2["flip every DEBIT<->CREDIT<br/>new entry id"]
+        R2 --> R3["same path as any entry<br/>funds check in tx"]
     end
 ```
 
-Reversals undergo ordinary posting checks and can fail if an account would become negative. The original ID appears in the description; there is no dedicated reversal-link constraint or rule preventing multiple reversals under different keys.
+Reversals undergo ordinary posting checks and can fail if an account would become negative. The original ID appears in the description; there is no dedicated reversal-link constraint or rule preventing multiple reversals under different keys. The command path loads the original inside its transaction; only the deprecated `reverse(original, metadata)` overload uses the supplied entry without verifying it was persisted.
 
 ## Fees
 
@@ -108,6 +113,14 @@ Reversals undergo ordinary posting checks and can fail if an account would becom
 `MONTHLY_ACCOUNT` exists as a fee type, but no monthly scheduling workflow is implemented. `chargeFee` takes an explicit amount and does not select a policy.
 
 ## Retry semantics
+
+**For new integrations, use the command overloads for deposit, transfer, withdrawal,
+fee charging and reversal.** Each claims the key
+before fee calculation or funds checks and returns `OperationResult` with the committed
+entry and a replay flag. See [command idempotency and schema upgrade](OPERATIONS.md).
+### Legacy entry-based retries
+
+The behavior below describes the deprecated `OperationMetadata` methods only.
 
 Retain operation metadata before the first attempt: journal entry ID, effective timestamp, optional external reference, and idempotency key. Reuse unchanged inputs and metadata on a retry.
 

@@ -225,6 +225,28 @@ public final class PostgresJournalEntryRepository implements JournalEntryReposit
     }
   }
 
+  /** Uses the caller's transaction; never commits or opens another connection. */
+  JournalEntry appendOperation(Connection connection, JournalEntry entry, IdempotencyKey key)
+      throws SQLException {
+    if (!insertJournalEntry(connection, entry, key)) {
+      throw new com.n2bank.application.command.IdempotencyConflictException(
+          "This key already belongs to a legacy journal posting");
+    }
+    enforceSufficientFunds(connection, entry);
+    insertPostings(connection, entry);
+    return loadByIdempotencyKey(connection, key);
+  }
+
+  JournalEntry loadById(Connection connection, UUID id) throws SQLException {
+    try (PreparedStatement statement = connection.prepareStatement(SELECT_ENTRY_BY_ID)) {
+      statement.setObject(1, id);
+      try (ResultSet row = statement.executeQuery()) {
+        if (!row.next()) throw new IllegalArgumentException("Journal entry does not exist: " + id);
+        return journalEntryMapper.map(row, loadPostings(connection, id));
+      }
+    }
+  }
+
   private boolean isDuplicateIdViolation(SQLException exception) {
     if (!"23505".equals(exception.getSQLState())) return false;
     String msg = exception.getMessage();
@@ -232,8 +254,9 @@ public final class PostgresJournalEntryRepository implements JournalEntryReposit
   }
 
   private void enforceSufficientFunds(Connection connection, JournalEntry entry) throws SQLException {
-    Set<UUID> affectedAccounts =
-        entry.postings().stream().map(Posting::accountId).collect(Collectors.toSet());
+    // Every append acquires account locks in the same UUID order.
+    List<UUID> affectedAccounts =
+        entry.postings().stream().map(Posting::accountId).distinct().sorted().toList();
 
     Map<UUID, List<Posting>> postingsByAccount =
         entry.postings().stream().collect(Collectors.groupingBy(Posting::accountId));
@@ -327,7 +350,7 @@ public final class PostgresJournalEntryRepository implements JournalEntryReposit
     }
   }
 
-  private JournalEntry loadByIdempotencyKey(
+  JournalEntry loadByIdempotencyKey(
       Connection connection, IdempotencyKey idempotencyKey) throws SQLException {
     try (PreparedStatement entryStatement =
         connection.prepareStatement(SELECT_ENTRY_BY_IDEMPOTENCY_KEY)) {

@@ -10,10 +10,11 @@ N² Bank Core runs inside its host backend's Java process. The host calls the li
 | --- | --- | --- |
 | `bootstrap` | Compose adapters and services; expose operations and own client lifecycle | [BankApplication](../src/main/java/com/n2bank/bootstrap/BankApplication.java) |
 | `domain.model` | Define monetary values, customers, accounts, and valid journal entries | [JournalEntry](../src/main/java/com/n2bank/domain/model/JournalEntry.java) |
-| `application.service` | Coordinate accounts, customers, posting, balance reads, and fee calculation | [PostingService](../src/main/java/com/n2bank/application/service/PostingService.java) |
+| `application.command` | Carry stable operation inputs, request fingerprints, and results | [TransferCommand](../src/main/java/com/n2bank/application/command/TransferCommand.java) |
+| `application.service` | Coordinate accounts, customers, posting, balance reads, fee calculation, and command execution | [OperationExecutor](../src/main/java/com/n2bank/application/service/OperationExecutor.java) |
 | `application.fee` | Calculate zero, fixed, or percentage fees | [FeePolicy](../src/main/java/com/n2bank/application/fee/FeePolicy.java) |
-| `application.port` | Define repository and cache interfaces | [JournalEntryRepository](../src/main/java/com/n2bank/application/port/JournalEntryRepository.java) |
-| `infrastructure.postgres` | Implement persistence, locking, and balance queries | [PostgresJournalEntryRepository](../src/main/java/com/n2bank/infrastructure/postgres/PostgresJournalEntryRepository.java) |
+| `application.port` | Define repository, operation-claim, and cache interfaces | [OperationRepository](../src/main/java/com/n2bank/application/port/OperationRepository.java) |
+| `infrastructure.postgres` | Implement persistence, locking, balance queries, and the command transaction | [PostgresOperationRepository](../src/main/java/com/n2bank/infrastructure/postgres/PostgresOperationRepository.java) |
 | `infrastructure.redis` | Store, retrieve, expire, and invalidate cached balances | [RedisBalanceCache](../src/main/java/com/n2bank/infrastructure/redis/RedisBalanceCache.java) |
 | `infrastructure.database` | Configure and own shared database clients | [DBHandler](../src/main/java/com/n2bank/infrastructure/database/DBHandler.java) |
 
@@ -26,15 +27,17 @@ Dependencies point inward — the domain has no outward imports. Wiring flows ou
 ```mermaid
 flowchart TD
     Domain["domain.model<br/>Money · Posting · JournalEntry<br/>Account · Customer<br/><i>no external deps</i>"]
-    Ports["application.port<br/>JournalEntryRepository · AccountRepository<br/>BalanceRepository · BalanceCache"]
-    Services["application.service + application.fee<br/>PostingService · BalanceService · FeeService<br/>FeePolicy"]
-    InfraPG["infrastructure.postgres<br/>PostgresJournalEntryRepository<br/>PostgresBalanceRepository"]
+    Commands["application.command<br/>DepositCommand · TransferCommand · ...<br/>OperationResult · IdempotencyConflictException"]
+    Ports["application.port<br/>JournalEntryRepository · AccountRepository<br/>BalanceRepository · BalanceCache · OperationRepository"]
+    Services["application.service + application.fee<br/>OperationExecutor · TransferHandler · ...<br/>PostingService · BalanceService · FeeService · FeePolicy"]
+    InfraPG["infrastructure.postgres<br/>PostgresOperationRepository<br/>PostgresJournalEntryRepository · PostgresBalanceRepository"]
     InfraRedis["infrastructure.redis<br/>RedisBalanceCache<br/>TTL 30s"]
     InfraDB["infrastructure.database<br/>DBHandler · DBConfig"]
     Bootstrap["bootstrap<br/>BankApplication facade"]
 
     Domain --> Ports
     Ports --> Services
+    Commands --> Services
     Services --> Bootstrap
     InfraPG -. implements .-> Ports
     InfraRedis -. implements .-> Ports
@@ -46,7 +49,51 @@ flowchart TD
 
 *Reading:* arrows = `depends on / uses`. Concrete adapters implement port interfaces; the facade owns client lifecycle.
 
-## Posting flow
+## Command posting flow
+
+1. The host builds an immutable command (`DepositCommand`, `TransferCommand`, `WithdrawalCommand`, `ChargeFeeCommand`, `ReversalCommand`). The facade delegates to the matching handler (`DepositHandler`, `TransferHandler`, and so on).
+2. The handler prepares postings through a function that `OperationExecutor` runs inside one `PostgresOperationRepository` transaction: claim the idempotency key, prepare the entry, append postings, commit. Account reads and journal writes share that connection.
+3. A claimed key with a matching operation type and fingerprint returns the stored entry without recalculating fees or rechecking funds. A different fingerprint throws `IdempotencyConflictException`. A rolled-back claim disappears, so a later attempt can execute.
+4. For a new key, the handler validates referenced accounts, calculates fees, locks affected accounts, checks resulting balances, and inserts the `operations` row together with the journal entry and postings.
+5. Deferred schema validation checks the complete entry at commit, including posting/account currency agreement, and the deferred foreign key rejects a claim without its journal entry.
+6. After commit, the executor invalidates each affected cached balance. A cache error does not change the committed result.
+
+This separation matters: cache invalidation is outside the database transaction, and constructor validation alone cannot establish whether referenced accounts exist.
+
+```mermaid
+sequenceDiagram
+    actor Host as Host backend
+    participant Facade as BankApplication
+    participant H as TransferHandler etc
+    participant EX as OperationExecutor
+    participant OP as PostgresOperationRepository
+    participant Redis as RedisBalanceCache
+
+    Host->>Facade: deposit / transfer / withdraw + Command
+    Facade->>H: handle command
+    H->>EX: execute command, prepare fn
+    EX->>OP: claim key, prepare entry, append postings<br/>single READ COMMITTED tx
+
+    alt key claimed, same type + fingerprint
+        OP-->>EX: stored journal entry
+        EX-->>Facade: OperationResult entry, replayed=true
+    else key claimed, different fingerprint
+        OP-->>EX: IdempotencyConflictException
+    else new key
+        OP->>OP: SELECT accounts FOR UPDATE<br/>funds check, fee from handler
+        OP->>OP: INSERT operations + journal_entries + postings<br/>COMMIT
+        Note over OP: DEFERRED trigger validate_complete_journal_entry<br/>at COMMIT checks balanced + currency + account-currency<br/>DEFERRED FK rejects claim without entry
+        OP-->>EX: committed entry
+        EX->>Redis: invalidate each affected account<br/>best-effort outside tx
+        EX-->>Facade: OperationResult entry, replayed=false
+    end
+```
+
+See [command idempotency and schema upgrade](OPERATIONS.md) for fingerprints, key scope, and migrations.
+
+### Legacy entry-based flow (deprecated)
+
+The deprecated `OperationMetadata` overloads bypass the command layer and post through `PostingService` directly:
 
 1. The facade checks operation-specific inputs, selects a fee policy where applicable, and constructs a journal entry. Transfer, withdrawal, and fee-charge calls also perform a preliminary balance check.
 2. The journal entry constructor validates positive postings through `Posting`, one currency, and matching debit and credit totals.
@@ -54,8 +101,6 @@ flowchart TD
 4. The PostgreSQL adapter handles the idempotency key. A matching retry returns the stored entry. A new entry locks affected accounts, checks resulting balances, inserts postings, and commits.
 5. Deferred schema validation checks the complete entry at commit, including posting/account currency agreement.
 6. After append returns, the service invalidates each affected cached balance. A cache error does not change the committed result.
-
-This separation matters: cache invalidation is outside the database transaction, and constructor validation alone cannot establish whether referenced accounts exist.
 
 ```mermaid
 sequenceDiagram
@@ -88,7 +133,7 @@ sequenceDiagram
     end
 ```
 
-*Cache invalidation never turns a committed entry into a failure; a `Redis` error is logged (`PostingService.java:41`).*
+*Cache invalidation never turns a committed entry into a failure; a `Redis` error is written to standard error in `PostingService.post`.*
 
 ## Read flow
 

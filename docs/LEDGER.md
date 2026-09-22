@@ -133,27 +133,29 @@ PostgreSQL amounts use `NUMERIC(38,18)`, imposing limits not enforced by the Mon
 
 ## Corrections
 
-`reverse(original, metadata)` appends equal amounts with opposite directions and leaves the original intact. It is an accounting reversal helper, not a refund workflow. It does not verify that the original was persisted or prevent repeated reversals under different keys.
+`reverse(ReversalCommand)` loads the original inside the command transaction, appends equal amounts with opposite directions, and leaves the original intact. It is an accounting reversal helper, not a refund workflow. A missing original is rejected without consuming the key. It does not prevent repeated reversals under different keys.
 
 ```mermaid
 sequenceDiagram
     actor Host as Host backend
     participant Facade as BankApplication
-    participant PS as PostingService
-    participant PG as PostgresJournalEntryRepository
+    participant H as ReversalHandler
+    participant EX as OperationExecutor
+    participant OP as PostgresOperationRepository
 
-    Host->>Facade: reverse originalEntry, newMetadata
-    Facade->>Facade: map each posting DEBIT<->CREDIT<br/>new id, new effectiveAt
-    Facade->>Facade: description = Reversal of original.id
-    Facade->>PS: post reversedEntry, newIdempotencyKey
-    PS->>PG: append reversedEntry
-    PG->>PG: same path as any entry<br/>lock, funds check, INSERT, DEFERRED balance check
-    alt insufficient funds after reversal
-        PG-->>PS: RepositoryException negative balance
-        PS-->>Host: RepositoryException
+    Host->>Facade: reverse ReversalCommand
+    Facade->>H: handle command
+    H->>EX: execute command, prepare fn
+    EX->>OP: claim key, load original, flip postings<br/>single tx
+    alt original missing
+        OP-->>EX: reject, key not consumed
+        EX-->>Host: IllegalArgumentException
     else success
-        PG-->>PS: committed reversal entry
-        PS-->>Host: reversal entry new id
+        OP->>OP: same path as any entry<br/>lock, funds check, INSERT, DEFERRED balance check
+        OP-->>EX: committed reversal entry
+        EX-->>Host: OperationResult reversal entry new id
     end
-    Note over Host,PG: Original intact<br/>No link constraint<br/>Different keys allow repeated reversals
+    Note over Host,OP: Original intact<br/>No link constraint<br/>Different keys allow repeated reversals
 ```
+
+The deprecated `reverse(original, metadata)` overload skips the lookup: it flips the supplied entry's postings without verifying the original was persisted.
