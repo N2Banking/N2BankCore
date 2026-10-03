@@ -56,6 +56,24 @@ public final class PostgresBalanceRepository implements BalanceRepository {
        ORDER BY a.account_type, a.currency
       """;
 
+  // As-of balance: same normal-balance arithmetic, but only postings whose entry
+  // satisfies effective_at <= asOf contribute. Future-dated entries are excluded.
+  private static final String SELECT_BALANCE_AS_OF =
+      """
+      SELECT a.currency,
+             CASE
+               WHEN a.account_type IN ('ASSET', 'EXPENSE') THEN
+                 COALESCE(SUM(CASE WHEN p.direction = 'DEBIT' THEN p.amount ELSE -p.amount END), 0)
+               ELSE
+                 COALESCE(SUM(CASE WHEN p.direction = 'CREDIT' THEN p.amount ELSE -p.amount END), 0)
+             END AS balance
+        FROM accounts a
+        LEFT JOIN postings p ON p.account_id = a.id
+         AND p.journal_entry_id IN (SELECT id FROM journal_entries WHERE effective_at <= ?)
+       WHERE a.id = ?
+       GROUP BY a.id, a.currency, a.account_type
+      """;
+
   // Single-query statement: fetch all postings for entries affecting the account, no N+1.
   private static final String SELECT_STATEMENT_FULL =
       """
@@ -96,6 +114,30 @@ public final class PostgresBalanceRepository implements BalanceRepository {
       }
     } catch (SQLException exception) {
       throw new RepositoryException("Could not read balance for account " + accountId, exception);
+    }
+  }
+
+  @Override
+  public Money getBalanceAsOf(UUID accountId, java.time.Instant asOf) {
+    Objects.requireNonNull(accountId, "Account ID cannot be null");
+    Objects.requireNonNull(asOf, "As-of instant cannot be null");
+
+    try (Connection connection = dataSource.getConnection();
+        PreparedStatement statement = connection.prepareStatement(SELECT_BALANCE_AS_OF)) {
+      statement.setObject(1, OffsetDateTime.ofInstant(asOf, ZoneOffset.UTC));
+      statement.setObject(2, accountId);
+      try (ResultSet result = statement.executeQuery()) {
+        if (!result.next()) {
+          throw new RepositoryException("Account does not exist: " + accountId);
+        }
+
+        BigDecimal amount = result.getBigDecimal("balance");
+        Currency currency = Currency.getInstance(result.getString("currency"));
+        return new Money(amount, currency);
+      }
+    } catch (SQLException exception) {
+      throw new RepositoryException(
+          "Could not read as-of balance for account " + accountId, exception);
     }
   }
 

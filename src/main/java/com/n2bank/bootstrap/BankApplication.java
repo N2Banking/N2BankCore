@@ -128,6 +128,14 @@ public final class BankApplication implements AutoCloseable {
     return balanceService().getBalance(accountId);
   }
 
+  /**
+   * Balance as of an instant: excludes postings whose entry is effective after {@code asOf}.
+   * The plain {@link #getBalance} sums every stored posting, including future-dated ones.
+   */
+  public Money getBalanceAsOf(UUID accountId, java.time.Instant asOf) {
+    return balanceService().getBalanceAsOf(accountId, asOf);
+  }
+
   public java.util.Map<String, Money> trialBalance() {
     return balanceService().trialBalance();
   }

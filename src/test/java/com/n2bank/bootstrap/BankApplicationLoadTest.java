@@ -5,6 +5,8 @@ import com.n2bank.application.fee.NoFeePolicy;
 import com.n2bank.domain.model.*;
 import com.n2bank.infrastructure.database.DBConfig;
 import com.n2bank.infrastructure.redis.RedisBalanceCache;
+import com.n2bank.testsupport.PostgresContainerSupport;
+import com.n2bank.testsupport.RedisContainerSupport;
 import java.math.BigDecimal;
 import java.nio.file.*;
 import java.sql.*;
@@ -29,9 +31,10 @@ class BankApplicationLoadTest {
   @BeforeEach
   void start() throws Exception {
     assertFalse(BankApplication.isInitialized(), "This test requires exclusive use of the application singleton");
-    String url = System.getenv().getOrDefault("N2BANK_TEST_URL", "jdbc:postgresql://localhost:5432/n2bank");
-    String user = System.getenv().getOrDefault("N2BANK_TEST_USER", "n2bank");
-    String password = System.getenv().getOrDefault("N2BANK_TEST_PASSWORD", "n2bank_local");
+    var endpoint = PostgresContainerSupport.endpoint();
+    String url = endpoint.jdbcUrl();
+    String user = endpoint.username();
+    String password = endpoint.password();
     assertNull(org.postgresql.Driver.parseURL(url, new Properties()).getProperty("currentSchema"),
         "Omit currentSchema: the test assigns its own disposable schema");
     admin = DriverManager.getConnection(url, user, password);
@@ -41,7 +44,7 @@ class BankApplicationLoadTest {
       admin.setSchema(schema);
       sql.execute(Files.readString(Path.of("database/schema.sql")));
     }
-    String redisUri = System.getenv().getOrDefault("N2BANK_TEST_REDIS_URI", "redis://localhost:6379");
+    String redisUri = RedisContainerSupport.redisUri();
     redis = RedisClient.create(redisUri);
     assertEquals("PONG", redis.ping(), "A live Redis instance is required for this integration test");
     config = new DBConfig(url + (url.contains("?") ? "&" : "?") + "currentSchema=" + schema

@@ -118,10 +118,14 @@ flowchart TB
     end
     Q["getBalance sums all postings<br/>no effectiveAt cutoff<br/>future-dated still counts"] -. on .-> Left
     Q -. on .-> Right
+    QA["getBalanceAsOf sums postings<br/>with effectiveAt <= asOf<br/>future-dated excluded"] -. as-of .-> Left
+    QA -. as-of .-> Right
     S["statement from,to<br/>filters by effectiveAt"] -. filters vs balance .-> Q
 ```
 
 Current balance queries include every stored posting, even future-dated ones. Effective timestamps support statement filtering; they do not schedule posting or delay its balance effect.
+
+`getBalanceAsOf(accountId, asOf)` is the explicit alternative: it sums only postings whose entry satisfies `effective_at <= asOf`, so future-dated entries are excluded. It always reads PostgreSQL and bypasses the balance cache, like statements do. Use it whenever a reported balance must not anticipate entries that are not yet effective.
 
 ## Precision and equality
 

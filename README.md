@@ -3,6 +3,12 @@
 </p>
 
 <h1 align="center">N2Banking Core</h1>
+<p align="center">
+  <a href="https://github.com/N2Banking/N2BankCore/actions/workflows/ci.yml"><img src="https://github.com/N2Banking/N2BankCore/actions/workflows/ci.yml/badge.svg" alt="CI build status" /></a>
+  <img src="https://img.shields.io/badge/Java-25-blue" alt="Java 25" />
+  <img src="https://img.shields.io/badge/PostgreSQL-17-336791" alt="PostgreSQL 17" />
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license" />
+</p>
 <p align="center"><strong>Banking operations. Balanced entries. Explicit rules.</strong><br />
 A Java library for banking operations and double-entry accounting.</p>
 <p align="center"><code>Java 25</code> · <code>PostgreSQL</code> · <code>Redis</code> · <code>0.1.0-SNAPSHOT</code></p>
@@ -78,7 +84,7 @@ See the [complete integration example](docs/examples/LibraryExample.java) for im
 | Journal entries | At least two positive postings, a single currency, equal debit and credit totals |
 | Banking operations | Deposits, transfers, withdrawals, explicit fee charges, and reversal entries |
 | Persistence | PostgreSQL customer, account, journal, balance, and statement adapters |
-| Reads | Account balances, complete entries in date-bounded statements, and totals by account type and currency |
+| Reads | Account balances, as-of balances excluding future-dated postings, complete entries in date-bounded statements, and totals by account type and currency |
 | Retry handling | Deposit, transfer, withdrawal, fee and reversal commands atomically claim a key and replay the committed result; legacy methods retain entry-based retry behavior. See [operation idempotency](docs/OPERATIONS.md). |
 | Cache | Redis balance reads with a default 30-second TTL and invalidation after journal commits |
 
@@ -94,7 +100,7 @@ mvn -DskipTests install
 
 This builds the JAR and installs `com.n2bank:n2bank-core:0.1.0-SNAPSHOT` into your local Maven repository. The [getting-started guide](docs/GETTING_STARTED.md) covers local services, schema setup, and running the example.
 
-**Before running `mvn test`:** the PostgreSQL tests drop and recreate tables in the configured database. Use the dedicated database setup in [Testing](docs/TESTING.md).
+**Before running `mvn test`:** integration tests start their own PostgreSQL/Redis via Testcontainers (Docker required) in disposable schemas, leaving your databases untouched. Set `N2BANK_TEST_URL`/`N2BANK_TEST_USER`/`N2BANK_TEST_PASSWORD` (and `N2BANK_TEST_REDIS_URI` for the facade workload) to reuse an external database instead — see [Testing](docs/TESTING.md).
 
 ## Documentation
 
@@ -110,3 +116,7 @@ This builds the JAR and installs `com.n2bank:n2bank-core:0.1.0-SNAPSHOT` into yo
 | [Diagrams](docs/DIAGRAMS.md) | Visual index of all Mermaid charts across the guides |
 
 There is no bundled backend server, payment-rail integration, recurring fee scheduler, or automatic migration runner. Fresh databases apply `database/schema.sql`; existing databases apply the manual scripts in `database/migrations/` — see [schema installation](docs/OPERATIONS.md#schema-installation).
+
+## License
+
+MIT — see [LICENSE](LICENSE).

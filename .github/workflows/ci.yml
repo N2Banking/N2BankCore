@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: n2bank_test
+          POSTGRES_USER: n2bank
+          POSTGRES_PASSWORD: n2bank_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U n2bank -d n2bank_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      N2BANK_TEST_URL: jdbc:postgresql://localhost:5432/n2bank_test
+      N2BANK_TEST_USER: n2bank
+      N2BANK_TEST_PASSWORD: n2bank_test_password
+      N2BANK_TEST_REDIS_URI: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      # Load workloads (BankingLoadTest, BankApplicationLoadTest) are excluded here;
+      # run them locally or on demand with a full `mvn test`.
+      - name: Build and test
+        run: mvn -B -Dtest='!BankingLoadTest,!BankApplicationLoadTest' test
+      - name: Upload surefire reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports

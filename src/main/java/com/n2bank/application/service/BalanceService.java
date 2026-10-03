@@ -42,6 +42,17 @@ public final class BalanceService {
     return balances.trialBalance();
   }
 
+  /**
+   * Balance as of an instant: only postings with {@code effective_at <= asOf} contribute, so
+   * future-dated entries are excluded. Always reads PostgreSQL and bypasses the cache, like
+   * {@link #statement}, because cached current balances may include future-dated postings.
+   */
+  public Money getBalanceAsOf(UUID accountId, java.time.Instant asOf) {
+    Objects.requireNonNull(accountId, "Account ID cannot be null");
+    Objects.requireNonNull(asOf, "As-of instant cannot be null");
+    return balances.getBalanceAsOf(accountId, asOf);
+  }
+
   /** Statement bypasses cache to avoid stale reads; see RedisBalanceCache TTL. */
   public java.util.List<com.n2bank.domain.model.JournalEntry> statement(
       UUID accountId, java.time.Instant from, java.time.Instant to) {

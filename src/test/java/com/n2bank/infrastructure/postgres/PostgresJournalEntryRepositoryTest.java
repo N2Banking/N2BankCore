@@ -2,15 +2,13 @@ package com.n2bank.infrastructure.postgres;
 
 import com.n2bank.application.port.RepositoryException;
 import com.n2bank.domain.model.*;
-import com.n2bank.infrastructure.database.DBConfig;
+import com.n2bank.testsupport.PostgresContainerSupport;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.junit.jupiter.api.*;
 
 import javax.sql.DataSource;
 import java.math.BigDecimal;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.Statement;
 import java.time.Instant;
@@ -27,12 +25,14 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Integration tests for journal persistence and transaction behavior.
- * Uses compose Postgres at localhost:5432 (n2bank/n2bank_local) if Testcontainers unavailable.
+ * Runs in a disposable Testcontainers-backed schema (or the {@code N2BANK_TEST_*} database
+ * when explicitly configured); never touches the application's tables.
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class PostgresJournalEntryRepositoryTest {
 
   private static DataSource dataSource;
+  private static String schema;
   private static PostgresJournalEntryRepository journal;
   private static PostgresAccountRepository accounts;
   private static PostgresBalanceRepository balances;
@@ -43,31 +43,18 @@ public class PostgresJournalEntryRepositoryTest {
 
   @BeforeAll
   static void setup() throws Exception {
-    // Prefer compose DB at localhost:5432; fallback to env DBConfig
+    var endpoint = PostgresContainerSupport.endpoint();
     HikariConfig cfg = new HikariConfig();
-    try {
-      DBConfig dbCfg = DBConfig.fromEnvironment();
-      cfg.setJdbcUrl(dbCfg.postgresUrl());
-      cfg.setUsername(dbCfg.postgresUser());
-      cfg.setPassword(dbCfg.postgresPassword());
-    } catch (Exception e) {
-      cfg.setJdbcUrl("jdbc:postgresql://localhost:5432/n2bank");
-      cfg.setUsername("n2bank");
-      cfg.setPassword("n2bank_local");
-    }
+    cfg.setJdbcUrl(endpoint.jdbcUrl());
+    cfg.setUsername(endpoint.username());
+    cfg.setPassword(endpoint.password());
     cfg.setMaximumPoolSize(5);
+    var pool = new HikariDataSource(cfg);
+    schema = PostgresContainerSupport.createIsolatedSchema(pool, "journal_test");
+    cfg.setSchema(schema);
+    // Rebuild the pool so every connection resolves unqualified tables to the test schema.
+    pool.close();
     dataSource = new HikariDataSource(cfg);
-
-    // Apply schema.sql (idempotent: drop and recreate if needed)
-    String schema = Files.readString(Path.of("database/schema.sql"));
-    try (Connection c = dataSource.getConnection(); Statement st = c.createStatement()) {
-      // Clean slate: drop existing objects if any (tables + functions) then recreate
-      try { st.execute("DROP TABLE IF EXISTS operations, postings, journal_entries, accounts, customers CASCADE"); } catch (Exception ignore) {}
-      try { st.execute("DROP FUNCTION IF EXISTS reject_journal_mutation() CASCADE"); } catch (Exception ignore) {}
-      try { st.execute("DROP FUNCTION IF EXISTS require_posting_in_entry_transaction() CASCADE"); } catch (Exception ignore) {}
-      try { st.execute("DROP FUNCTION IF EXISTS validate_complete_journal_entry() CASCADE"); } catch (Exception ignore) {}
-      st.execute(schema);
-    }
 
     journal = new PostgresJournalEntryRepository(dataSource);
     accounts = new PostgresAccountRepository(dataSource);
@@ -76,8 +63,12 @@ public class PostgresJournalEntryRepositoryTest {
   }
 
   @AfterAll
-  static void teardown() {
-    if (dataSource instanceof HikariDataSource h) h.close();
+  static void teardown() throws Exception {
+    try {
+      PostgresContainerSupport.dropSchema(dataSource, schema);
+    } finally {
+      if (dataSource instanceof HikariDataSource h) h.close();
+    }
   }
 
   @BeforeEach

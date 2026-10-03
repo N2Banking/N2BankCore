@@ -8,9 +8,12 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Coordinates posting journal entries to the bank's single logical ledger. */
 public final class PostingService {
+  private static final Logger LOG = LoggerFactory.getLogger(PostingService.class);
   private final JournalEntryRepository journalEntries;
   private final BalanceCache balances;
 
@@ -39,14 +42,17 @@ public final class PostingService {
       try {
         balances.invalidate(accountId);
       } catch (UnsupportedOperationException cacheNotImplemented) {
-        System.err.printf(
-            "Journal entry %s committed; balance cache invalidation is not implemented yet.%n",
-            stored.id());
+        LOG.warn(
+            "Journal entry {} committed; balance cache invalidation is not implemented yet.",
+            stored.id(),
+            cacheNotImplemented);
         break;
       } catch (RuntimeException cacheFailure) {
-        System.err.printf(
-            "Journal entry %s committed, but cache invalidation failed for account %s: %s%n",
-            stored.id(), accountId, cacheFailure.getMessage());
+        LOG.warn(
+            "Journal entry {} committed, but cache invalidation failed for account {}",
+            stored.id(),
+            accountId,
+            cacheFailure);
       }
     }
     return stored;

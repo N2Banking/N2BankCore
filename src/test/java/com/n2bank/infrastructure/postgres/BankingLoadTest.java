@@ -6,6 +6,7 @@ import com.n2bank.application.port.RepositoryException;
 import com.n2bank.application.service.*;
 import com.n2bank.domain.model.*;
 import com.n2bank.infrastructure.redis.NoOpBalanceCache;
+import com.n2bank.testsupport.PostgresContainerSupport;
 import com.zaxxer.hikari.*;
 import java.math.BigDecimal;
 import java.nio.file.*;
@@ -31,10 +32,11 @@ class BankingLoadTest {
 
   @BeforeEach
   void start() throws Exception {
+    var endpoint = PostgresContainerSupport.endpoint();
     var config = new HikariConfig();
-    config.setJdbcUrl(System.getenv().getOrDefault("N2BANK_TEST_URL", "jdbc:postgresql://localhost:5432/n2bank"));
-    config.setUsername(System.getenv().getOrDefault("N2BANK_TEST_USER", "n2bank"));
-    config.setPassword(System.getenv().getOrDefault("N2BANK_TEST_PASSWORD", "n2bank_local"));
+    config.setJdbcUrl(endpoint.jdbcUrl());
+    config.setUsername(endpoint.username());
+    config.setPassword(endpoint.password());
     config.setMaximumPoolSize(poolSize);
     config.setConnectionInitSql("SET statement_timeout = '15s'");
     schema = "load_test_" + UUID.randomUUID().toString().replace("-", "");

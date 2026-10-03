@@ -175,11 +175,12 @@ sequenceDiagram
 | Method | Result |
 | --- | --- |
 | `getAccount(id)` | Required account; missing IDs throw |
-| `getBalance(id)` | Normal balance, potentially cached |
+| `getBalance(id)` | Normal balance over all stored postings, potentially cached |
+| `getBalanceAsOf(id, asOf)` | Balance over postings with `effective_at <= asOf`; always reads PostgreSQL |
 | `statement(id, from, to)` | Complete entries affecting the account within inclusive effective-time bounds |
 | `trialBalance()` | Totals by account type/currency, keyed like `ASSET:EUR` |
 
-Statements and trial balances bypass Redis. Statements include counterparties' postings, not just the selected account's lines; account for this when authorizing and exposing responses.
+Statements, trial balances, and as-of balances bypass Redis. Statements include counterparties' postings, not just the selected account's lines; account for this when authorizing and exposing responses.
 
 ## Errors
 

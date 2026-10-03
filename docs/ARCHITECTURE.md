@@ -133,13 +133,13 @@ sequenceDiagram
     end
 ```
 
-*Cache invalidation never turns a committed entry into a failure; a `Redis` error is written to standard error in `PostingService.post`.*
+*Cache invalidation never turns a committed entry into a failure; a `Redis` error is logged via SLF4J in `PostingService.post` and `OperationExecutor.execute`. The library depends only on `slf4j-api`; the hosting backend chooses the logging implementation (tests bind `slf4j-simple`).*
 
 ## Read flow
 
 `getBalance` checks Redis first, then calculates a balance through PostgreSQL on a miss or cache error. Successful database reads are cached on a best-effort basis. Statements and trial balances bypass Redis.
 
-Balances sum persisted postings. The account type determines the normal sign; see [Accounting model](LEDGER.md). The balance query has no effective-date cutoff, so even a future-dated stored entry participates in the current balance.
+Balances sum persisted postings. The account type determines the normal sign; see [Accounting model](LEDGER.md). The balance query has no effective-date cutoff, so even a future-dated stored entry participates in the current balance. `getBalanceAsOf(accountId, asOf)` excludes postings with `effective_at > asOf` and bypasses the cache.
 
 ```mermaid
 flowchart TD
@@ -148,11 +148,11 @@ flowchart TD
     B -- "miss / Redis error" --> D["Postgres SELECT balance<br/>accounts LEFT JOIN postings<br/>CASE debit-minus-credit vs credit-minus-debit"]
     D --> E["cache.put TTL 30s<br/>best-effort"]
     E --> F["return authoritative balance"]
-    G["statement / trialBalance<br/>BalanceService"] -. "bypass cache<br/>avoid stale reads" .-> D
-    H["effectiveAt in future"] -. "still counted<br/>filter is statement-only" .-> D
+    G["statement / trialBalance<br/>getBalanceAsOf<br/>BalanceService"] -. "bypass cache<br/>avoid stale reads" .-> D
+    H["effectiveAt in future"] -. "still counted by getBalance<br/>excluded by getBalanceAsOf<br/>statement filters by window" .-> D
 ```
 
-*`statement()` and `trialBalance()` always hit Postgres; `getBalance()` is the only cached path.*
+*`statement()`, `trialBalance()`, and `getBalanceAsOf()` always hit Postgres; `getBalance()` is the only cached path.*
 
 ## Host responsibilities
 

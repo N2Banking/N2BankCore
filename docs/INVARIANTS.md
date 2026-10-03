@@ -8,11 +8,13 @@ These are bounded implementation rules, not a claim of production readiness. “
 
 | Rule | Enforcement | Existing verification |
 | --- | --- | --- |
-| Monetary values have an amount and currency | [Money](../src/main/java/com/n2bank/domain/model/Money.java) rejects nulls | No dedicated money test class |
-| Addition and subtraction require matching currencies | [Money](../src/main/java/com/n2bank/domain/model/Money.java) | No dedicated currency-arithmetic test |
-| Posting amounts are greater than zero | [Posting](../src/main/java/com/n2bank/domain/model/Posting.java) | No dedicated posting test class |
-| Entries have at least two postings, one currency, and equal debit/credit totals | [JournalEntry](../src/main/java/com/n2bank/domain/model/JournalEntry.java) | Valid entries exercised in repository tests; no dedicated constructor rejection suite |
-| A constructed entry's posting list cannot be modified | `List.copyOf` in [JournalEntry](../src/main/java/com/n2bank/domain/model/JournalEntry.java) | No dedicated immutability test |
+| Monetary values have an amount and currency | [Money](../src/main/java/com/n2bank/domain/model/Money.java) rejects nulls | [MoneyTest](../src/test/java/com/n2bank/domain/model/MoneyTest.java): null, currency-code and decimal rejection |
+| Addition and subtraction require matching currencies | [Money](../src/main/java/com/n2bank/domain/model/Money.java) | [MoneyTest](../src/test/java/com/n2bank/domain/model/MoneyTest.java): cross-currency add/subtract rejection |
+| Posting amounts are greater than zero | [Posting](../src/main/java/com/n2bank/domain/model/Posting.java) | [PostingTest](../src/test/java/com/n2bank/domain/model/PostingTest.java): zero/negative rejection |
+| Entries have at least two postings, one currency, and equal debit/credit totals | [JournalEntry](../src/main/java/com/n2bank/domain/model/JournalEntry.java) | [JournalEntryTest](../src/test/java/com/n2bank/domain/model/JournalEntryTest.java): count, currency, balance and description rejection |
+| A constructed entry's posting list cannot be modified | `List.copyOf` in [JournalEntry](../src/main/java/com/n2bank/domain/model/JournalEntry.java) | [JournalEntryTest](../src/test/java/com/n2bank/domain/model/JournalEntryTest.java): immutability snapshot |
+| Fee policies charge explicit, non-negative amounts in the operation currency | [FixedFeePolicy](../src/main/java/com/n2bank/application/fee/FixedFeePolicy.java), [PercentageFeePolicy](../src/main/java/com/n2bank/application/fee/PercentageFeePolicy.java), [NoFeePolicy](../src/main/java/com/n2bank/application/fee/NoFeePolicy.java), [FeeContext](../src/main/java/com/n2bank/application/fee/FeeContext.java) | [FeePolicyTest](../src/test/java/com/n2bank/application/fee/FeePolicyTest.java): amounts, mismatch, rounding, context validation |
+| Current balances include every stored posting; as-of balances exclude future-dated entries | [PostgresBalanceRepository](../src/main/java/com/n2bank/infrastructure/postgres/PostgresBalanceRepository.java) | [PostgresBalanceAsOfTest](../src/test/java/com/n2bank/infrastructure/postgres/PostgresBalanceAsOfTest.java) |
 
 `Money` permits negative and zero amounts; `Posting` imposes positivity. Decimal storage does not itself impose currency minor-unit rounding. See [precision and equality](LEDGER.md#precision-and-equality).
 
@@ -43,7 +45,7 @@ flowchart TB
     end
 
     subgraph Cache["Cache best-effort<br/>RedisBalanceCache"]
-        K1["invalidate after commit<br/>failure logged not failed op"]
+        K1["invalidate after commit<br/>failure logged via SLF4J not failed op"]
         K2["TTL 30s stale refill possible"]
     end
 

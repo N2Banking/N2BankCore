@@ -6,6 +6,7 @@ import com.n2bank.application.port.RepositoryException;
 import com.n2bank.application.service.*;
 import com.n2bank.domain.model.*;
 import com.n2bank.infrastructure.redis.NoOpBalanceCache;
+import com.n2bank.testsupport.PostgresContainerSupport;
 import com.zaxxer.hikari.*;
 import java.nio.file.*;
 import java.sql.*;
@@ -25,10 +26,11 @@ class PostgresOperationRepositoryTest {
 
   @BeforeAll
   static void start() throws Exception {
+    var endpoint = PostgresContainerSupport.endpoint();
     HikariConfig config = new HikariConfig();
-    config.setJdbcUrl(System.getenv().getOrDefault("N2BANK_TEST_URL", "jdbc:postgresql://localhost:5432/n2bank"));
-    config.setUsername(System.getenv().getOrDefault("N2BANK_TEST_USER", "n2bank"));
-    config.setPassword(System.getenv().getOrDefault("N2BANK_TEST_PASSWORD", "n2bank_local"));
+    config.setJdbcUrl(endpoint.jdbcUrl());
+    config.setUsername(endpoint.username());
+    config.setPassword(endpoint.password());
     config.setMaximumPoolSize(3);
     schema = "operations_test_" + UUID.randomUUID().toString().replace("-", "");
     config.setSchema(schema);
